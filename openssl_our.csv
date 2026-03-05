@@ -1,0 +1,6 @@
+﻿Project,CVE,File,Function,Patch commit,Ex-patch commit
+openssl,CVE-2018-0732,crypto/dh/dh_key.c,generate_key,https://github.com/openssl/openssl/commit/91f7361f47b082ae61ffe1a7b17bb2adf213c7fe,https://github.com/openssl/openssl/commit/a21180b70f6372fee836557df187d72f7a91b686
+openssl,CVE-2018-0737,crypto/rsa/rsa_gen.c,rsa_builtin_keygen,https://github.com/openssl/openssl/commit/54f007af94b8924a46786b34665223c127c19081 ,https://github.com/openssl/openssl/commit/b0a97931fbfd5c84e1ac031cb8a8d213d437fec5
+openssl,CVE-2019-1543,crypto/evp/e_chacha20_poly1305.c,chacha20_poly1305_ctrl,https://github.com/openssl/openssl/commit/2a3d0ee9d59156c48973592331404471aca886d6,https://github.com/openssl/openssl/commit/18e1e302452e6dea4500b6f981cee7e151294dea
+openssl,CVE-2020-1971,crypto/x509/v3_genn.c,GENERAL_NAME_cmp,https://github.com/openssl/openssl/commit/b33c48b75aaf33c93aeda42d7138616b9e6a64cb,https://github.com/openssl/openssl/commit/198b11683568452282bd48828fcf60d4835bf327
+openssl,CVE-2022-0778,crypto/bn/bn_sqrt.c,BN_mod_sqrt,https://github.com/openssl/openssl/commit/3118eb64934499d93db3230748a452351d1d9a65,https://github.com/openssl/openssl/commit/84a9f7e0eae81245da28d552d40e197d579f3a9b
