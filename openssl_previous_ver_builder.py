@@ -16,7 +16,13 @@ CFLAGS = ["linux-x86_64","-O0", "-g"]
 def run_cmd(cmd, cwd=OPENSSL_DIR, env=None):
     """지정된 디렉터리에서 셸 명령어를 실행합니다."""
     print(f"[*] 실행 중: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    try:
+        result = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    except OSError as e:
+        error_text = str(e)
+        print(f"[!] 에러 발생: {error_text}")
+        return False, error_text
+
     if result.returncode != 0:
         print(f"[!] 에러 발생: {result.stderr}")
         return False, result.stderr.strip()
@@ -52,18 +58,19 @@ def process_commit(commit_url, cve_id, target_file, state, failures):
     # perl -pi -e 'if(/File::Glob/){ s/qw\s*[\(\/]\s*glob\s*[\)\/]/qw\/:glob\//g }' Configure test/build.info
     run_cmd(["perl", "-pi", "-e", 'if(/File::Glob/){ s/qw\\s*[\\(\\/]+\\s*glob\\s*[\\)\\/]+/qw\\/glob\\//g }', configure_path, build_info_path])
 
-    # 4. ./Configure 설정
+    # 4. Configure 설정
     configure_env = os.environ.copy()
     configure_env["CC"] = GCC_BIN
     configure_env["CXX"] = GPP_BIN
-    print(f"[*] 실행 중: ./Configure {' '.join(CFLAGS)} (CC={GCC_BIN}, CXX={GPP_BIN})")
-    configure_ok, configure_err = run_cmd(["./Configure", *CFLAGS], env=configure_env)
+    print(f"[*] 실행 중: perl ./Configure {' '.join(CFLAGS)} (CC={GCC_BIN}, CXX={GPP_BIN})")
+    configure_ok, configure_err = run_cmd(["perl", "./Configure", *CFLAGS], env=configure_env)
     if not configure_ok:
         record_failure(failures, cve_id, state, "configure", configure_err)
         return
 
     # 5. make -j$(nproc)
-    make_ok, make_err = run_cmd(["make", "-j$(nproc)"])
+    jobs = max(1, os.cpu_count() or 1)
+    make_ok, make_err = run_cmd(["make", f"-j{jobs}"])
     if not make_ok:
         record_failure(failures, cve_id, state, "make", make_err)
         return
