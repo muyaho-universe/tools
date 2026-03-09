@@ -102,17 +102,29 @@ def process_commit(commit_url, cve_id, target_file, state, failures):
         libs_to_copy = ["libcrypto.so", "libssl.so"]
     
     for lib in libs_to_copy:
-        # find 명령으로 라이브러리 파일 위치 찾기 (하위 디렉터리 포함)
+        # find 명령으로 라이브러리 파일 위치 찾기 (하위 디렉터리 포함, 와일드카드 사용)
         find_result = subprocess.run(
-            ["find", ".", "-name", lib, "-type", "f"],
+            ["find", ".", "-name", f"{lib}*", "-type", "f"],
             cwd=OPENSSL_DIR,
             capture_output=True,
             text=True
         )
         
         if find_result.returncode == 0 and find_result.stdout.strip():
-            # 첫 번째로 찾은 파일 사용
-            lib_path = find_result.stdout.strip().split('\n')[0]
+            # 찾은 파일들 출력
+            found_files = find_result.stdout.strip().split('\n')
+            print(f"[*] {lib} 패턴으로 찾은 파일들: {found_files}")
+            
+            # 심볼릭 링크가 아닌 실제 파일 우선 선택, 없으면 첫 번째 파일 사용
+            lib_path = None
+            for f in found_files:
+                full_path = os.path.join(OPENSSL_DIR, f.lstrip('./'))
+                if not os.path.islink(full_path):
+                    lib_path = f
+                    break
+            if not lib_path:
+                lib_path = found_files[0]
+            
             full_lib_path = os.path.join(OPENSSL_DIR, lib_path.lstrip('./'))
             
             output_name = f"{cve_id}_{state}_gcc_O0_{lib}"
