@@ -127,7 +127,7 @@ def process_commit(commit_url, cve_id, target_file, state, failures):
             
             full_lib_path = os.path.join(OPENSSL_DIR, lib_path.lstrip('./'))
             
-            output_name = f"{cve_id}_{state}_gcc_O0_{lib}"
+            output_name = f"{cve_id}_{state}_gcc_O0"
             output_path = os.path.join("..", output_name)
             copy_ok, copy_err = run_cmd(["cp", full_lib_path, output_path], cwd=OPENSSL_DIR)
             if copy_ok:
