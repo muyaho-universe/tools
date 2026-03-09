@@ -78,8 +78,8 @@ def process_commit(commit_url, cve_id, target_file, state, failures):
     configure_env = os.environ.copy()
     configure_env["CC"] = GCC_BIN
     configure_env["CXX"] = GPP_BIN
-    print(f"[*] 실행 중: ./Configure {' '.join(CFLAGS)} (CC={GCC_BIN}, CXX={GPP_BIN})")
-    configure_ok, configure_err = run_cmd(["./Configure", *CFLAGS], env=configure_env)
+    print(f"[*] 실행 중: perl Configure {' '.join(CFLAGS)} (CC={GCC_BIN}, CXX={GPP_BIN})")
+    configure_ok, configure_err = run_cmd(["perl", "Configure", *CFLAGS], env=configure_env)
     if not configure_ok:
         record_failure(failures, cve_id, state, "configure", configure_err)
         return
