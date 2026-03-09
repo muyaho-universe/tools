@@ -2,6 +2,8 @@ import os
 import csv
 import subprocess
 
+import git
+
 # 기본 경로 및 명령어 설정
 OPENSSL_DIR = "/home/user/openssl"
 CLANG_BIN = "/home/user/BinForge/tools/clang/clang-14.0.6/bin/clang"
@@ -11,7 +13,7 @@ CSV_FILE = "openssl_old.csv"
 FAILED_LOG_FILE = "openssl_failed_steps.txt"
 
 
-CFLAGS = ["linux-x86_64","-O0", "-g"]
+CFLAGS = ["linux-x86_64", "shared", "-g", "-O0"]
 
 def run_cmd(cmd, cwd=OPENSSL_DIR, env=None):
     """지정된 디렉터리에서 셸 명령어를 실행합니다."""
@@ -52,18 +54,34 @@ def process_commit(commit_url, cve_id, target_file, state, failures):
         record_failure(failures, cve_id, state, "checkout", checkout_err)
         return
 
-    # 3. Configure test/build.info 파일 수정
+    # 3. Configure test/build.info 파일 수정 (필요한 경우에만)
     build_info_path = os.path.join(OPENSSL_DIR, "test", "build.info")
     configure_path = os.path.join(OPENSSL_DIR, "Configure")
-    # perl -pi -e 'if(/File::Glob/){ s/qw\s*[\(\/]\s*glob\s*[\)\/]/qw\/:glob\//g }' Configure test/build.info
-    run_cmd(["perl", "-pi", "-e", 'if(/File::Glob/){ s/qw\\s*[\\(\\/]+\\s*glob\\s*[\\)\\/]+/qw\\/glob\\//g }', configure_path, build_info_path])
+    
+    # grep으로 File::Glob 패턴이 있는지 확인
+    grep_result = subprocess.run(
+        ["grep", "-n", "File::Glob", "Configure", "test/build.info"],
+        cwd=OPENSSL_DIR,
+        capture_output=True,
+        text=True
+    )
+    
+    # File::Glob 패턴이 발견되면 파일 수정
+    fixed = False
+    if grep_result.returncode == 0 and "File::Glob" in grep_result.stdout:
+        print(f"[*] File::Glob 패턴 감지, 파일 수정 실행")
+        # Convert both "qw/glob/" and "qw( glob )" forms to "qw/:glob/".
+        run_cmd(["perl", "-pi", "-e", 'if(/File::Glob/){ s/qw\\s*[\\(\\/]\\s*:?\\s*glob\\s*[\\)\\/]/qw\\/:glob\\//g }', configure_path, build_info_path])
+        fixed = True
+    else:
+        print(f"[*] File::Glob 패턴이 없음, 파일 수정 건너뛰기")
 
     # 4. Configure 설정
     configure_env = os.environ.copy()
     configure_env["CC"] = GCC_BIN
     configure_env["CXX"] = GPP_BIN
-    print(f"[*] 실행 중: perl ./Configure {' '.join(CFLAGS)} (CC={GCC_BIN}, CXX={GPP_BIN})")
-    configure_ok, configure_err = run_cmd(["perl", "./Configure", *CFLAGS], env=configure_env)
+    print(f"[*] 실행 중: ./Configure {' '.join(CFLAGS)} (CC={GCC_BIN}, CXX={GPP_BIN})")
+    configure_ok, configure_err = run_cmd(["./Configure", *CFLAGS], env=configure_env)
     if not configure_ok:
         record_failure(failures, cve_id, state, "configure", configure_err)
         return
@@ -75,26 +93,57 @@ def process_commit(commit_url, cve_id, target_file, state, failures):
         record_failure(failures, cve_id, state, "make", make_err)
         return
 
-    # 6. libcrypto.so*와 libssl.so*를 찾고, 존재하면 ../ 디렉터리에 복사
-    # 복사 시 파일명은 {cve_id}_{state}_gcc_O0_crypto.so나 {cve_id}_{state}_gcc_O0_ssl.so 형태로 저장
-    for lib in ["libcrypto.so", "libssl.so"]:
-        lib_path = os.path.join(OPENSSL_DIR, "lib", lib)
-        if os.path.exists(lib_path):
+    # 6. target_file 경로를 기반으로 필요한 라이브러리만 찾아서 복사
+    # File 열이 crypto로 시작하면 libcrypto.so, ssl로 시작하면 libssl.so 복사
+    if target_file.startswith("crypto/"):
+        libs_to_copy = ["libcrypto.so"]
+    elif target_file.startswith("ssl/"):
+        libs_to_copy = ["libssl.so"]
+    else:
+        # 기본적으로 둘 다 복사
+        libs_to_copy = ["libcrypto.so", "libssl.so"]
+    
+    for lib in libs_to_copy:
+        # find 명령으로 라이브러리 파일 위치 찾기 (하위 디렉터리 포함)
+        find_result = subprocess.run(
+            ["find", ".", "-name", lib, "-type", "f"],
+            cwd=OPENSSL_DIR,
+            capture_output=True,
+            text=True
+        )
+        
+        if find_result.returncode == 0 and find_result.stdout.strip():
+            # 첫 번째로 찾은 파일 사용
+            lib_path = find_result.stdout.strip().split('\n')[0]
+            full_lib_path = os.path.join(OPENSSL_DIR, lib_path.lstrip('./'))
+            
             output_name = f"{cve_id}_{state}_gcc_O0_{lib}"
             output_path = os.path.join("..", output_name)
-            copy_ok, copy_err = run_cmd(["cp", lib_path, output_path], cwd=OPENSSL_DIR)
+            copy_ok, copy_err = run_cmd(["cp", full_lib_path, output_path], cwd=OPENSSL_DIR)
             if copy_ok:
-                print(f"[+] 성공적으로 복사됨: {output_path}")
+                print(f"[+] 성공적으로 복사됨: {lib_path} -> {output_path}")
             else:
                 record_failure(failures, cve_id, state, f"copy {lib}", copy_err)
         else:
-            print(f"[!] 라이브러리 파일이 존재하지 않음: {lib_path}")
+            print(f"[!] 라이브러리 파일을 찾을 수 없음: {lib}")
             record_failure(failures, cve_id, state, f"copy {lib}", "library file not found")
 
-    # 7. make distclean (다음 빌드 꼬임 방지용 초기화)
-    distclean_ok, distclean_err = run_cmd(["make", "distclean"])
+    # 7. make clean (다음 빌드 꼬임 방지용 초기화)
+    distclean_ok, distclean_err = run_cmd(["make", "clean"])
     if not distclean_ok:
-        record_failure(failures, cve_id, state, "distclean", distclean_err)
+        record_failure(failures, cve_id, state, "clean", distclean_err)
+
+    # 8. git reset --hard HEAD (다음 커밋 처리 전에 작업 디렉터리 초기화)
+    # git clean -xfd
+    # git reset --hard HEAD
+    run_cmd(["git", "checkout", "."])
+    clean_ok, clean_err = run_cmd(["git", "clean", "-xfd"])
+    if not clean_ok:
+        record_failure(failures, cve_id, state, "git clean", clean_err)
+    reset_ok, reset_err = run_cmd(["git", "reset", "--hard", "HEAD"])
+    if not reset_ok:
+        record_failure(failures, cve_id, state, "git reset", reset_err)
+
 
 def main():
     failures = []
