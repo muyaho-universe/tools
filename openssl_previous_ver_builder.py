@@ -2,8 +2,6 @@ import os
 import csv
 import subprocess
 
-import git
-
 # 기본 경로 및 명령어 설정
 OPENSSL_DIR = "/home/user/openssl"
 CLANG_BIN = "/home/user/BinForge/tools/clang/clang-14.0.6/bin/clang"
