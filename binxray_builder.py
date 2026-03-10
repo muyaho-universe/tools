@@ -1,5 +1,6 @@
 import os
 import csv
+import shutil
 import subprocess
 
 # 기본 경로 및 명령어 설정
@@ -16,6 +17,138 @@ FAILED_LOG_FILE = "binxray_failed_steps.txt"
 
 
 CFLAGS = ["linux-x86_64", "shared", "-g", "-O0"]
+
+def is_real_binary_or_library(path):
+    """
+    실제 빌드 산출물(ELF executable/shared object/static archive)인지 확인.
+    tcpdump.1 같은 문서 파일을 걸러냄.
+    """
+    if not os.path.isfile(path):
+        return False
+
+    # 너무 뻔한 문서/스크립트/메타파일 제외
+    bad_suffixes = (
+        ".1", ".3", ".5", ".7", ".8", ".txt", ".md", ".in", ".pc", ".la", ".a.la"
+    )
+    if path.endswith(bad_suffixes):
+        return False
+
+    # file 명령으로 타입 판별
+    try:
+        result = subprocess.run(
+            ["file", "-b", path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        desc = result.stdout.strip().lower()
+    except OSError:
+        # file 명령이 없으면 확장자 기반 최소 판별
+        base = os.path.basename(path)
+        return (
+            ".so" in base
+            or base.endswith(".a")
+            or os.access(path, os.X_OK)
+        )
+
+    if "elf" in desc:
+        return True
+    if "current ar archive" in desc:
+        return True
+
+    return False
+
+def find_built_artifact(project):
+    """
+    프로젝트별로 '실제 빌드 산출물'만 찾는다.
+    우선순위가 높은 경로를 먼저 보고, 없으면 제한된 패턴 탐색 후 file로 필터링한다.
+    """
+    match project:
+        case "tcpdump":
+            binary_name = "tcpdump"
+            project_dir = TCPDUMP_DIR
+        case "libxml2":
+            binary_name = "libxml2.so.2"
+            project_dir = LIBXML2_DIR
+        case "freetype":
+            binary_name = "libfreetype.so.6"
+            project_dir = FREETYPE_DIR
+        case _:
+            pass
+
+    # 1) 우선순위 경로
+    candidate_paths = {
+        "tcpdump": [
+            "tcpdump",                 # 실제 실행 파일
+            "./tcpdump",
+        ],
+        "freetype": [
+            "objs/.libs/libfreetype.so",
+            "objs/.libs/libfreetype.a",
+            "objs/.libs/libfreetype.so.6",
+            "objs/.libs/libfreetype.so.6.0.0",
+        ],
+        "libxml2": [
+            ".libs/libxml2.so",
+            ".libs/libxml2.a",
+            ".libs/libxml2.so.2",
+        ],
+        # openssl은 현재 process_commit에서 실질 지원 안 함
+        "openssl": [],
+    }
+
+    for rel in candidate_paths.get(project, []):
+        full = os.path.join(project_dir, rel)
+        if os.path.exists(full) and is_real_binary_or_library(full):
+            return full
+
+    # 2) 제한된 패턴 탐색
+    pattern_map = {
+        "tcpdump": ["tcpdump"],
+        "freetype": ["libfreetype.so*", "libfreetype.a"],
+        "libxml2": ["libxml2.so*", "libxml2.a"],
+        "openssl": [],
+    }
+
+    search_roots = {
+        "tcpdump": ["."],
+        "freetype": ["objs/.libs", "."],
+        "libxml2": [".libs", "."],
+        "openssl": ["."],
+    }
+
+    for root in search_roots.get(project, ["."]):
+        root_path = os.path.join(project_dir, root)
+        if not os.path.exists(root_path):
+            continue
+
+        for pattern in pattern_map.get(project, []):
+            try:
+                result = subprocess.run(
+                    ["find", root, "-name", pattern, "-type", "f"],
+                    cwd=project_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except OSError:
+                continue
+
+            if result.returncode != 0 or not result.stdout.strip():
+                continue
+
+            found = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+            # 긴 버전의 .so 우선, 그 다음 실제 바이너리/라이브러리만 통과
+            found.sort(key=lambda p: (".so." not in p, len(p)))
+
+            for relpath in found:
+                full = os.path.join(project_dir, relpath.lstrip("./"))
+                if is_real_binary_or_library(full):
+                    return full
+
+    return None
+
 
 def run_cmd(cmd, project, env=None):
     """지정된 디렉터리에서 셸 명령어를 실행합니다."""
@@ -99,6 +232,10 @@ def process_commit(commit_url, project, cve_id, target_file, state, failures):
             run_cmd(["./autogen.sh"], project, env=configure_env)
 
         case "freetype":
+            # 이전 설정 꼬임 방지
+            config_mk = os.path.join(FREETYPE_DIR, "config.mk")
+            if os.path.exists(config_mk):
+                os.remove(config_mk)
             configure_env["CPPFLAGS"] = "-I/usr/include -I/usr/include/x86_64-linux-gnu"
             configure_env["LDFLAGS"] = "-L/usr/lib/x86_64-linux-gnu -L/lib/x86_64-linux-gnu"
             
@@ -137,52 +274,21 @@ def process_commit(commit_url, project, cve_id, target_file, state, failures):
         )
         
     """
-    match project:
-        case "tcpdump":
-            binary_name = "tcpdump"
-            working_dir = TCPDUMP_DIR
-        case "libxml2":
-            binary_name = "libxml2.so.2"
-            working_dir = LIBXML2_DIR
-        case "freetype":
-            binary_name = "libfreetype.so.6"
-            working_dir = FREETYPE_DIR
-        case _:
-            pass
-    find_result = subprocess.run(
-        ["find", ".", "-name", f"{binary_name}*", "-type", "f"],
-        cwd=working_dir,
-        capture_output=True,
-        text=True
-    )
-
-    if find_result.returncode == 0 and find_result.stdout.strip():
-        # 찾은 파일들 출력
-        found_files = find_result.stdout.strip().split('\n')
-        print(f"[*] {binary_name} 패턴으로 찾은 파일들: {found_files}")
-        
-        # 심볼릭 링크가 아닌 실제 파일 우선 선택, 없으면 첫 번째 파일 사용
-        lib_path = None
-        for f in found_files:
-            full_path = os.path.join(working_dir, f.lstrip('./'))
-            if not os.path.islink(full_path):
-                lib_path = f
-                break
-        if not lib_path:
-            lib_path = found_files[0]
-        
-        full_lib_path = os.path.join(working_dir, lib_path.lstrip('./'))
-        
+    artifact_path = find_built_artifact(project)
+    if artifact_path:
+        ext = os.path.splitext(artifact_path)[1]
         output_name = f"{cve_id}_{state}_gcc_O0"
-        output_path = os.path.join("..", output_name)
-        copy_ok, copy_err = run_cmd(["cp", full_lib_path, output_path], project)
-        if copy_ok:
-            print(f"[+] 성공적으로 복사됨: {lib_path} -> {output_path}")
-        else:
-            record_failure(failures, cve_id, state, f"copy {binary_name}", copy_err)
+        output_path = os.path.abspath(os.path.join("/home/user/binxray_output", project, output_name))
+
+        try:
+            shutil.copy2(artifact_path, output_path)
+            print(f"[+] 성공적으로 복사됨: {artifact_path} -> {output_path}")
+        except OSError as e:
+            record_failure(failures, cve_id, state, f"copy artifact", str(e))
     else:
-        print(f"[!] 라이브러리 파일을 찾을 수 없음: {binary_name}")
-        record_failure(failures, cve_id, state, f"copy {binary_name}", "library file not found")
+        print(f"[!] 실제 빌드 산출물을 찾을 수 없음: {project}")
+        record_failure(failures, cve_id, state, "copy artifact", "built artifact not found")
+    
     # 6. make clean (다음 빌드 꼬임 방지용 초기화)
     clean_ok, clean_err = run_cmd(["make", "clean"], project)
     if not clean_ok:
