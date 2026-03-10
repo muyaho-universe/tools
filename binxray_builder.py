@@ -236,6 +236,7 @@ def process_commit(commit_url, project, cve_id, target_file, state, failures):
             config_mk = os.path.join(FREETYPE_DIR, "config.mk")
             if os.path.exists(config_mk):
                 os.remove(config_mk)
+            run_cmd(["./autogen.sh"], project, env=configure_env)
             configure_env["CPPFLAGS"] = "-I/usr/include -I/usr/include/x86_64-linux-gnu"
             configure_env["LDFLAGS"] = "-L/usr/lib/x86_64-linux-gnu -L/lib/x86_64-linux-gnu"
             
