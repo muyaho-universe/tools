@@ -204,7 +204,7 @@ def main():
     failures = []
 
     # 1. CSV 파일 읽고 한줄씩 처리
-    with open(CSV_FILE, 'r', encoding='utf-8') as f:
+    with open(CSV_FILE, 'r', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         for row in reader:
             project = row['Project']
