@@ -231,10 +231,12 @@ def is_openvpn_openssl3_compat_error(error_text):
     if not error_text:
         return False
     text = error_text.lower()
+    if "openssl_compat.h" not in text:
+        return False
     return (
-        "openssl_compat.h" in text
-        and "evp_pkey_get_id" in text
-        and "static declaration" in text
+        ("evp_pkey_get_id" in text and "static declaration" in text)
+        or ("evp_pkey_id" in text and "incomplete type" in text)
+        or ("pkey->type" in text and "incomplete type" in text)
     )
 
 def patch_openvpn_openssl_compat_header():
@@ -252,15 +254,25 @@ def patch_openvpn_openssl_compat_header():
     if marker not in content:
         return False, "EVP_PKEY_id compatibility block not found"
 
-    if "#undef EVP_PKEY_id" in content:
+    changed = False
+    if "#undef EVP_PKEY_id" not in content:
+        insert_pos = content.find(marker)
+        if insert_pos == -1:
+            return False, "cannot locate insertion point"
+        patch_line = "#ifdef EVP_PKEY_id\n#undef EVP_PKEY_id\n#endif\n"
+        content = content[:insert_pos] + patch_line + content[insert_pos:]
+        changed = True
+
+    old_return = "return pkey ? pkey->type : EVP_PKEY_NONE;"
+    new_return = (
+        "return pkey ? EVP_PKEY_get_id(pkey) : EVP_PKEY_NONE;"
+    )
+    if old_return in content:
+        content = content.replace(old_return, new_return)
+        changed = True
+
+    if not changed:
         return True, "already patched"
-
-    insert_pos = content.find(marker)
-    if insert_pos == -1:
-        return False, "cannot locate insertion point"
-
-    patch_line = "#ifdef EVP_PKEY_id\n#undef EVP_PKEY_id\n#endif\n"
-    content = content[:insert_pos] + patch_line + content[insert_pos:]
 
     try:
         with open(header_path, "w", encoding="utf-8") as f:
