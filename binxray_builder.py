@@ -21,6 +21,15 @@ FAILED_LOG_FILE = "binxray_failed_steps.txt"
 
 CFLAGS = ["linux-x86_64", "shared", "-g", "-O0"]
 
+PROJECT_DIRS = {
+    "openssl": OPENSSL_DIR,
+    "tcpdump": TCPDUMP_DIR,
+    "freetype": FREETYPE_DIR,
+    "libxml2": LIBXML2_DIR,
+    "expat": LIBEXPAT_WORK_DIR,
+    "openvpn": OPENVPN_DIR,
+}
+
 def is_real_binary_or_library(path):
     """
     실제 빌드 산출물(ELF executable/shared object/static archive)인지 확인.
@@ -68,19 +77,17 @@ def find_built_artifact(project):
     """
     match project:
         case "tcpdump":
-            binary_name = "tcpdump"
             project_dir = TCPDUMP_DIR
         case "libxml2":
-            binary_name = "libxml2.so.2"
             project_dir = LIBXML2_DIR
         case "freetype":
-            binary_name = "libfreetype.so.6"
             project_dir = FREETYPE_DIR
         case "expat":
-            binary_name = "libexpat.so.1"
             project_dir = LIBEXPAT_DIR
+        case "openvpn":
+            project_dir = OPENVPN_DIR
         case _:
-            pass
+            return None
 
     # 1) 우선순위 경로
     candidate_paths = {
@@ -166,20 +173,7 @@ def find_built_artifact(project):
 def run_cmd(cmd, project, env=None):
     """지정된 디렉터리에서 셸 명령어를 실행합니다."""
     print(f"[*] 실행 중: {' '.join(cmd)}")
-    if project == "openssl":
-        cwd = OPENSSL_DIR
-    elif project == "tcpdump":
-        cwd = TCPDUMP_DIR
-    elif project == "freetype":
-        cwd = FREETYPE_DIR
-    elif project == "libxml2":
-        cwd = LIBXML2_DIR
-    elif project == "expat":
-        cwd = LIBEXPAT_WORK_DIR
-    elif project == "openvpn":
-        cwd = OPENVPN_DIR
-    else:
-        cwd = "."
+    cwd = PROJECT_DIRS.get(project, ".")
     try:
         result = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     except OSError as e:
@@ -200,6 +194,39 @@ def record_failure(failures, cve_id, state, step, error_msg=""):
     failures.append(line)
     print(f"[!] 실패 기록: {line}")
 
+def ensure_configure_exists(project, configure_env, cve_id, state, failures):
+    project_dir = PROJECT_DIRS.get(project, ".")
+    configure_path = os.path.join(project_dir, "configure")
+    if os.path.exists(configure_path):
+        return True
+
+    if project == "openvpn":
+        autogen = os.path.join(project_dir, "autogen.sh")
+        if os.path.exists(autogen):
+            ok, err = run_cmd(["./autogen.sh"], project, env=configure_env)
+            if not ok:
+                record_failure(failures, cve_id, state, "autogen", err)
+                return False
+        else:
+            ok, err = run_cmd(["autoreconf", "-vi"], project, env=configure_env)
+            if not ok:
+                record_failure(failures, cve_id, state, "autoreconf", err)
+                return False
+
+    elif project == "expat":
+        buildconf = os.path.join(project_dir, "buildconf.sh")
+        if os.path.exists(buildconf):
+            ok, err = run_cmd(["./buildconf.sh"], project, env=configure_env)
+            if not ok:
+                record_failure(failures, cve_id, state, "buildconf", err)
+                return False
+
+    if not os.path.exists(configure_path):
+        record_failure(failures, cve_id, state, "configure", "configure script not found after bootstrap")
+        return False
+
+    return True
+
 def process_commit(commit_url, project, cve_id, target_file, state, failures):
     """특정 커밋으로 이동하여 -O0 및 -O3 버전을 각각 추출합니다."""
     # 1. 커밋 해시 추출 (URL의 마지막 부분)
@@ -211,12 +238,10 @@ def process_commit(commit_url, project, cve_id, target_file, state, failures):
     print(f"\n--- [ {cve_id} / {state} ] 커밋 {commit_hash} 처리 시작 ---")
 
     # 2. git checkout
-    if project == "expat":
-        # expat은 configure 전에 소스 트리 변경 필요
-        checkout_ok, checkout_err = run_cmd(["git", "checkout", "-f", commit_hash], LIBEXPAT_DIR)
-    else:
-        checkout_ok, checkout_err = run_cmd(["git", "checkout", "-f", commit_hash], project)
+    checkout_ok, checkout_err = run_cmd(["git", "checkout", "-f", commit_hash], project)
     if not checkout_ok:
+        if "unable to read tree" in checkout_err.lower():
+            checkout_err += " (repository may be shallow/partial or missing objects; try `git fetch --all --tags --unshallow` in project repo)"
         record_failure(failures, cve_id, state, "checkout", checkout_err)
         return
 
@@ -295,6 +320,10 @@ def process_commit(commit_url, project, cve_id, target_file, state, failures):
         configure_cmd = ["./configure", "--disable-plugin-auth-pam"]
     else:
         configure_cmd = ["./configure"]
+
+    if not ensure_configure_exists(project, configure_env, cve_id, state, failures):
+        return
+
     configure_ok, configure_err = run_cmd(configure_cmd, project, env=configure_env)
     # configure_ok, configure_err = run_cmd(["perl", "Configure", *CFLAGS], env=configure_env)
     
