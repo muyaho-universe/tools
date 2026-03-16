@@ -8,6 +8,9 @@ OPENSSL_DIR = "/home/user/openssl"
 TCPDUMP_DIR = "/home/user/tcpdump"
 FREETYPE_DIR = "/home/user/freetype"
 LIBXML2_DIR = "/home/user/libxml2"
+LIBEXPAT_DIR = "/home/user/libexpat"
+LIBEXPAT_WORK_DIR = "/home/user/libexpat/expat"
+OPENVPN_DIR = "/home/user/openvpn"
 
 CLANG_BIN = "/home/user/BinForge/tools/clang/clang-14.0.6/bin/clang"
 GCC_BIN = "/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-gcc"
@@ -73,6 +76,9 @@ def find_built_artifact(project):
         case "freetype":
             binary_name = "libfreetype.so.6"
             project_dir = FREETYPE_DIR
+        case "expat":
+            binary_name = "libexpat.so.1"
+            project_dir = LIBEXPAT_DIR
         case _:
             pass
 
@@ -95,6 +101,13 @@ def find_built_artifact(project):
         ],
         # openssl은 현재 process_commit에서 실질 지원 안 함
         "openssl": [],
+        "expat": [
+            "expat/.libs/libexpat.so.1.6.2",
+        ],
+        "openvpn": [
+            "src/openvpn",
+            "./src/openvpn/openvpn",
+        ],
     }
 
     for rel in candidate_paths.get(project, []):
@@ -161,6 +174,12 @@ def run_cmd(cmd, project, env=None):
         cwd = FREETYPE_DIR
     elif project == "libxml2":
         cwd = LIBXML2_DIR
+    elif project == "expat":
+        cwd = LIBEXPAT_WORK_DIR
+    elif project == "openvpn":
+        cwd = OPENVPN_DIR
+    else:
+        cwd = "."
     try:
         result = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     except OSError as e:
@@ -192,7 +211,11 @@ def process_commit(commit_url, project, cve_id, target_file, state, failures):
     print(f"\n--- [ {cve_id} / {state} ] 커밋 {commit_hash} 처리 시작 ---")
 
     # 2. git checkout
-    checkout_ok, checkout_err = run_cmd(["git", "checkout", "-f", commit_hash], project)
+    if project == "expat":
+        # expat은 configure 전에 소스 트리 변경 필요
+        checkout_ok, checkout_err = run_cmd(["git", "checkout", "-f", commit_hash], LIBEXPAT_DIR)
+    else:
+        checkout_ok, checkout_err = run_cmd(["git", "checkout", "-f", commit_hash], project)
     if not checkout_ok:
         record_failure(failures, cve_id, state, "checkout", checkout_err)
         return
@@ -216,6 +239,18 @@ def process_commit(commit_url, project, cve_id, target_file, state, failures):
         CC={GCC_BIN} CXX={GPP_BIN} CFLAGS="-O0 -g" CXXFLAGS="-O0 -g" ./configure
     freetype:
         CC={GCC_BIN} CXX={GPP_BIN} CPPFLAGS="-I/usr/include -I/usr/include/x86_64-linux-gnu" LDFLAGS="-L/usr/lib/x86_64-linux-gnu -L/lib/x86_64-linux-gnu" CFLAGS="-O0 -g" CXXFLAGS="-O0 -g" ./configure
+    expat:
+        export CC=/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-gcc
+        CFLAGS="-g -O0"
+        ./buildconf.sh
+        ./configure
+    openvpn:
+            export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/share/pkgconfig:$PKG_CONFIG_PATH
+            export CPPFLAGS="-I/usr/local/include"
+            export LDFLAGS="-L/usr/local/lib -L/usr/local/lib64"
+            export CC=/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-gcc
+            export CFLAGS="-g -O0"
+            ./configure --disable-plugin-auth-pam
     """
     configure_env = os.environ.copy()
     configure_env["CC"] = GCC_BIN
@@ -240,10 +275,27 @@ def process_commit(commit_url, project, cve_id, target_file, state, failures):
             configure_env["CPPFLAGS"] = "-I/usr/include -I/usr/include/x86_64-linux-gnu"
             configure_env["LDFLAGS"] = "-L/usr/lib/x86_64-linux-gnu -L/lib/x86_64-linux-gnu"
             
+        case "expat":
+            configure_env["CC"] = GCC_BIN
+            configure_env["CXX"] = GPP_BIN
+            configure_env["CFLAGS"] = "-g -O0"
+
+        case "openvpn":
+            configure_env["PKG_CONFIG_PATH"] = "/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/share/pkgconfig:" + configure_env.get("PKG_CONFIG_PATH", "")
+            configure_env["CPPFLAGS"] = "-I/usr/local/include"
+            configure_env["LDFLAGS"] = "-L/usr/local/lib -L/usr/local/lib64"
+            configure_env["CC"] = GCC_BIN
+            configure_env["CFLAGS"] = "-g -O0"
+            configure_env["CXXFLAGS"] = "-g -O0"
+            # --disable-plugin-auth-pam 옵션은 configure 단계에서만 적용되므로 configure 명령어에 직접 포함시킴
         case _:
             pass
-
-    configure_ok, configure_err = run_cmd(["./configure"], project, env=configure_env)
+    
+    if project == "openvpn":
+        configure_cmd = ["./configure", "--disable-plugin-auth-pam"]
+    else:
+        configure_cmd = ["./configure"]
+    configure_ok, configure_err = run_cmd(configure_cmd, project, env=configure_env)
     # configure_ok, configure_err = run_cmd(["perl", "Configure", *CFLAGS], env=configure_env)
     
     if not configure_ok:
