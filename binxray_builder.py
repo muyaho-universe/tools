@@ -227,6 +227,16 @@ def ensure_configure_exists(project, configure_env, cve_id, state, failures):
 
     return True
 
+def is_openvpn_openssl3_compat_error(error_text):
+    if not error_text:
+        return False
+    text = error_text.lower()
+    return (
+        "openssl_compat.h" in text
+        and "evp_pkey_get_id" in text
+        and "static declaration" in text
+    )
+
 def process_commit(commit_url, project, cve_id, target_file, state, failures):
     """특정 커밋으로 이동하여 -O0 및 -O3 버전을 각각 추출합니다."""
     # 1. 커밋 해시 추출 (URL의 마지막 부분)
@@ -334,6 +344,15 @@ def process_commit(commit_url, project, cve_id, target_file, state, failures):
     # 4. make -j$(nproc)
     jobs = max(1, os.cpu_count() or 1)
     make_ok, make_err = run_cmd(["make", f"-j{jobs}"], project, env=configure_env)
+    if (not make_ok) and project == "openvpn" and is_openvpn_openssl3_compat_error(make_err):
+        print("[*] OpenSSL 3 호환 오류 감지: OpenVPN 컴파일 플래그를 보강해 재시도합니다.")
+        compat_flag = "-DHAVE_EVP_PKEY_GET_ID=1"
+        existing_cppflags = configure_env.get("CPPFLAGS", "").strip()
+        if compat_flag not in existing_cppflags:
+            configure_env["CPPFLAGS"] = (existing_cppflags + " " + compat_flag).strip()
+        run_cmd(["make", "clean"], project, env=configure_env)
+        make_ok, make_err = run_cmd(["make", f"-j{jobs}"], project, env=configure_env)
+
     if not make_ok:
         record_failure(failures, cve_id, state, "make", make_err)
         return
