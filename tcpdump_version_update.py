@@ -6,9 +6,9 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
 
-CSV_PATH = Path("/home/user/tcpdump_version.csv")
+CSV_PATH = Path("/home/user/tools/tcpdump_version.csv")
 REPO_PATH = Path("/home/user/tcpdump")
-OUTPUT_PATH = Path("/home/user/tcpdump_version_filled.csv")
+OUTPUT_PATH = Path("/home/user/tools/tcpdump_version_filled.csv")
 
 GITHUB_COMMIT_PREFIX = "https://github.com/the-tcpdump-group/tcpdump/commit/"
 
