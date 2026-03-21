@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    print(f"[start] csv={args.csv} output={args.output} mode={args.mode} only_project={args.only_project or 'ALL'}")
     failures = run_pipeline(
         csv_path=args.csv,
         output_root=args.output,
@@ -36,6 +37,7 @@ def main() -> None:
 
     fail_log = Path(args.fail_log)
     fail_log.write_text("\n".join(failures) + ("\n" if failures else "No failures\n"), encoding="utf-8")
+    print(f"[finish] processed with failures={len(failures)}")
     print(f"[done] failure log: {fail_log.resolve()}")
     print(f"[done] total failures: {len(failures)}")
 

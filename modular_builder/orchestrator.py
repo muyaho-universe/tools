@@ -56,9 +56,11 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
 
 
 def _build_once(profile: BuildProfile, row: BuildRow, ref: str, ref_kind: str, ctx: BuildContext) -> list[Path]:
+    print(f"[build-start] project={profile.name} cve={row.cve} ref_kind={ref_kind} ref={ref}")
     cache_key = (profile.name, ref)
     cache_dir = ctx.output_root / "_cache" / profile.name / ref
     if cache_key in ctx.built_cache and cache_dir.exists():
+        print(f"[cache-hit] project={profile.name} ref={ref}")
         return [p for p in cache_dir.iterdir() if p.is_file()]
 
     env = os.environ.copy()
@@ -99,6 +101,7 @@ def _build_once(profile: BuildProfile, row: BuildRow, ref: str, ref_kind: str, c
         copied = [p for p in cache_dir.iterdir() if p.is_file()]
     ctx.built_cache.add(cache_key)
     run_cmd(profile.clean_cmd, cwd=profile.repo_dir, env=env)
+    print(f"[build-done] project={profile.name} cve={row.cve} ref_kind={ref_kind} ref={ref} artifacts={len(copied)}")
     return copied
 
 
@@ -106,7 +109,11 @@ def _emit_row_outputs(ctx: BuildContext, row: BuildRow, ref_kind: str, ref: str,
     out_dir = ctx.output_root / row.project / row.cve / ref_kind
     short_ref = ref[:12]
     prefix = f"{row.cve}_{ref_kind}_{short_ref}"
-    copy_artifacts(cache_files, out_dir, prefix)
+    copied = copy_artifacts(cache_files, out_dir, prefix)
+    if copied:
+        print(f"[out] project={row.project} cve={row.cve} ref_kind={ref_kind} copied={len(copied)} -> {out_dir}")
+    else:
+        print(f"[out-skip] project={row.project} cve={row.cve} ref_kind={ref_kind} (already exists)")
 
 
 def _process_commits(profile: BuildProfile, row: BuildRow, ctx: BuildContext) -> None:
@@ -130,6 +137,10 @@ def _process_releases(profile: BuildProfile, row: BuildRow, ctx: BuildContext) -
     except Exception as exc:
         _log_failure(ctx, row, "release_range", "tag_scan", str(exc))
         return
+    print(
+        f"[release-range] project={row.project} cve={row.cve} "
+        f"start={start} end={end} tags={len(tags)}"
+    )
 
     for tag in tags:
         ref = tag.tag
@@ -158,6 +169,7 @@ def run_pipeline(
                 continue
             if only_project and row.project != only_project:
                 continue
+            print(f"\n[row] project={row.project} cve={row.cve} file={row.file}")
 
             profile = profiles.get(row.project)
             if not profile:

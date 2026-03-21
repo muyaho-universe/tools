@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -13,21 +14,39 @@ def run_cmd(
     env: dict[str, str] | None = None,
     quiet_stdout: bool = True,
 ) -> tuple[bool, str]:
+    cmd_text = " ".join(cmd)
+    print(f"[cmd] cwd={cwd} :: {cmd_text}")
     try:
-        result = subprocess.run(
-            cmd,
+        proc = subprocess.Popen(
+            cmd,  # noqa: S603
             cwd=str(cwd),
             env=env,
             text=True,
-            stdout=subprocess.DEVNULL if quiet_stdout else subprocess.PIPE,
+            stdout=subprocess.DEVNULL if quiet_stdout else None,
             stderr=subprocess.PIPE,
-            check=False,
         )
     except OSError as exc:
         return False, str(exc)
 
-    if result.returncode != 0:
-        return False, (result.stderr or "").strip()
+    start = time.time()
+    while proc.poll() is None:
+        elapsed = int(time.time() - start)
+        print(f"[running] {elapsed}s :: {cmd_text}")
+        time.sleep(10)
+
+    stderr_text = ""
+    if proc.stderr is not None:
+        try:
+            stderr_text = proc.stderr.read() or ""
+        except OSError:
+            stderr_text = ""
+
+    result_code = proc.returncode or 0
+    elapsed = int(time.time() - start)
+    print(f"[done] rc={result_code} elapsed={elapsed}s :: {cmd_text}")
+
+    if result_code != 0:
+        return False, stderr_text.strip()
     return True, ""
 
 
