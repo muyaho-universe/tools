@@ -43,6 +43,13 @@ def _checkout_ref(profile: BuildProfile, ref: str) -> tuple[bool, str]:
     return run_cmd(["git", "checkout", "-f", ref], cwd=profile.repo_dir)
 
 
+def _hard_clean_repo(profile: BuildProfile) -> None:
+    # Different refs in old projects (especially OpenSSL) often leave stale artifacts.
+    # Enforce a pristine tree before/after each build attempt.
+    run_cmd(["git", "reset", "--hard", "HEAD"], cwd=profile.repo_dir)
+    run_cmd(["git", "clean", "-xfd"], cwd=profile.repo_dir)
+
+
 def _ensure_repo(profile: BuildProfile) -> tuple[bool, str]:
     if profile.repo_dir.exists():
         return True, ""
@@ -117,55 +124,60 @@ def _build_once(
     env.update(profile.env_overrides)
     env.update(variant.env_overrides)
 
-    ok, err = _checkout_ref(profile, ref)
-    if not ok:
-        _log_failure(ctx, row, ref_kind, "checkout", err)
-        return []
+    try:
+        _hard_clean_repo(profile)
 
-    ok, err = _prepare_build(profile, env)
-    if not ok:
-        _log_failure(ctx, row, ref_kind, "pre_step", err)
-        return []
-
-    if profile.configure_cmd:
-        configure_cmd = _render_tokens(profile.configure_cmd, variant)
-        ok, err = run_cmd(configure_cmd, cwd=profile.repo_dir, env=env)
+        ok, err = _checkout_ref(profile, ref)
         if not ok:
-            _log_failure(ctx, row, ref_kind, "configure", err)
+            _log_failure(ctx, row, ref_kind, "checkout", err)
             return []
 
-    build_cmd = _render_tokens(profile.build_cmd, variant)
-    if build_cmd == ["make"]:
-        jobs = max(1, os.cpu_count() or 1)
-        build_cmd.append(f"-j{jobs}")
-    ok, err = run_cmd(build_cmd, cwd=profile.repo_dir, env=env)
-    if not ok:
-        _log_failure(ctx, row, ref_kind, "build", err)
-        return []
+        ok, err = _prepare_build(profile, env)
+        if not ok:
+            _log_failure(ctx, row, ref_kind, "pre_step", err)
+            return []
 
-    artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
-    if not artifacts:
-        _log_failure(ctx, row, ref_kind, "artifact", "artifact not found")
-        return []
+        if profile.configure_cmd:
+            configure_cmd = _render_tokens(profile.configure_cmd, variant)
+            ok, err = run_cmd(configure_cmd, cwd=profile.repo_dir, env=env)
+            if not ok:
+                _log_failure(ctx, row, ref_kind, "configure", err)
+                return []
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    copied: list[Path] = []
-    for artifact in artifacts:
-        dst = cache_dir / artifact.name
-        if dst.exists():
+        build_cmd = _render_tokens(profile.build_cmd, variant)
+        if build_cmd == ["make"]:
+            jobs = max(1, os.cpu_count() or 1)
+            build_cmd.append(f"-j{jobs}")
+        ok, err = run_cmd(build_cmd, cwd=profile.repo_dir, env=env)
+        if not ok:
+            _log_failure(ctx, row, ref_kind, "build", err)
+            return []
+
+        artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+        if not artifacts:
+            _log_failure(ctx, row, ref_kind, "artifact", "artifact not found")
+            return []
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        copied: list[Path] = []
+        for artifact in artifacts:
+            dst = cache_dir / artifact.name
+            if dst.exists():
+                copied.append(dst)
+                continue
+            shutil.copy2(artifact, dst)
             copied.append(dst)
-            continue
-        shutil.copy2(artifact, dst)
-        copied.append(dst)
-    if not copied and cache_dir.exists():
-        copied = [p for p in cache_dir.iterdir() if p.is_file()]
-    ctx.built_cache.add(cache_key)
-    run_cmd(_render_tokens(profile.clean_cmd, variant), cwd=profile.repo_dir, env=env)
-    print(
-        f"[build-done] project={profile.name} cve={row.cve} ref_kind={ref_kind} "
-        f"ref={ref} variant={variant.key} artifacts={len(copied)}"
-    )
-    return copied
+        if not copied and cache_dir.exists():
+            copied = [p for p in cache_dir.iterdir() if p.is_file()]
+        ctx.built_cache.add(cache_key)
+        print(
+            f"[build-done] project={profile.name} cve={row.cve} ref_kind={ref_kind} "
+            f"ref={ref} variant={variant.key} artifacts={len(copied)}"
+        )
+        return copied
+    finally:
+        run_cmd(_render_tokens(profile.clean_cmd, variant), cwd=profile.repo_dir, env=env)
+        _hard_clean_repo(profile)
 
 
 def _default_variant(profile: BuildProfile) -> BuildVariant:
