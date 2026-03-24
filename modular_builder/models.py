@@ -42,7 +42,7 @@ class BuildRow:
         if self.patch_commit:
             refs.append(("patch", self.patch_commit))
         if self.ex_patch_commit:
-            refs.append(("ex_patch", self.ex_patch_commit))
+            refs.append(("vuln", self.ex_patch_commit))
         return refs
 
     def has_release_window(self) -> bool:

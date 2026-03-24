@@ -281,7 +281,7 @@ def _version_token(ref_kind: str) -> str:
 
 
 def _outputs_already_exist(ctx: BuildContext, row: BuildRow, ref_kind: str, variant: BuildVariant) -> bool:
-    out_dir = ctx.output_root / row.project / row.cve / ref_kind
+    out_dir = ctx.output_root / row.project / ref_kind
     if not out_dir.exists():
         return False
     arch = os.getenv("TARGET_ARCH", "x86")
@@ -301,7 +301,7 @@ def _emit_row_outputs(
     variant: BuildVariant,
     cache_files: list[Path],
 ) -> None:
-    out_dir = ctx.output_root / row.project / row.cve / ref_kind
+    out_dir = ctx.output_root / row.project / ref_kind
     out_dir.mkdir(parents=True, exist_ok=True)
     opt = variant.opt
     compiler = variant.compiler
@@ -310,8 +310,12 @@ def _emit_row_outputs(
     copied_count = 0
 
     for idx, src in enumerate(cache_files, start=1):
-        artifact_name = src.name
-        base_name = f"{artifact_name}_{row.project}-{version}_{opt}_{arch}_{compiler}"
+        if ref_kind in {"patch", "vuln"}:
+            base_name = f"{row.cve}_{ref_kind}_{compiler}_{opt}"
+        else:
+            artifact_name = src.name
+            base_name = f"{artifact_name}_{row.project}-{version}_{opt}_{arch}_{compiler}"
+
         dst_name = base_name if len(cache_files) == 1 else f"{base_name}_{idx}"
         dst = out_dir / dst_name
         if dst.exists():
