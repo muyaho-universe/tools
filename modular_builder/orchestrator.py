@@ -65,6 +65,11 @@ def _ensure_repo(profile: BuildProfile) -> tuple[bool, str]:
 
 
 def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, str]:
+    if profile.name == "openssl":
+        ok, err = _patch_openssl_fileglob_issue(profile.repo_dir)
+        if not ok:
+            return False, err
+
     configure_path = profile.repo_dir / "configure"
     for step in profile.pre_steps:
         if step and step[0].endswith("autogen.sh") and configure_path.exists():
@@ -72,6 +77,35 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
         ok, err = run_cmd(step, cwd=profile.repo_dir, env=env)
         if not ok:
             return False, err
+    return True, ""
+
+
+def _patch_openssl_fileglob_issue(repo_dir: Path) -> tuple[bool, str]:
+    targets = [repo_dir / "Configure", repo_dir / "test" / "build.info"]
+    pattern = re.compile(r"qw\s*[\(/]\s*:?\s*glob\s*[\)/]")
+    changed_any = False
+
+    for path in targets:
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return False, str(exc)
+
+        if "File::Glob" not in text:
+            continue
+
+        new_text = pattern.sub("qw/:glob/", text)
+        if new_text != text:
+            try:
+                path.write_text(new_text, encoding="utf-8")
+                changed_any = True
+            except OSError as exc:
+                return False, str(exc)
+
+    if changed_any:
+        print("[openssl-fix] applied File::Glob compatibility patch")
     return True, ""
 
 
