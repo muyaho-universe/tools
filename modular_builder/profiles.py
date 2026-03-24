@@ -10,7 +10,7 @@ from .utils import is_real_binary_or_library
 
 
 PreStep = Callable[[Path, dict[str, str], BuildRow], None]
-ArtifactResolver = Callable[[Path, BuildRow], list[Path]]
+ArtifactResolver = Callable[[Path, BuildRow, str], list[Path]]
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,7 @@ class BuildProfile:
 def _default_env() -> dict[str, str]:
     gcc = os.getenv("GCC_BIN", "/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-gcc")
     gpp = os.getenv("GPP_BIN", "/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-g++")
+    clang = os.getenv("CLANG_BIN", "/home/user/BinForge/tools/clang/clang-13.0.1/bin/clang")
     return {
         "CC": gcc,
         "CXX": gpp,
@@ -38,12 +39,13 @@ def _default_env() -> dict[str, str]:
     }
 
 
-def _openssl_resolver(repo_dir: Path, row: BuildRow) -> list[Path]:
+def _openssl_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path]:
     patterns = ["libcrypto.so*", "libssl.so*"]
-    if row.file.startswith("crypto/"):
-        patterns = ["libcrypto.so*"]
-    elif row.file.startswith("ssl/"):
-        patterns = ["libssl.so*"]
+    if not ref_kind.startswith("release_"):
+        if row.file.startswith("crypto/"):
+            patterns = ["libcrypto.so*"]
+        elif row.file.startswith("ssl/"):
+            patterns = ["libssl.so*"]
     found: list[Path] = []
     for pattern in patterns:
         for p in sorted(repo_dir.glob(f"**/{pattern}")):
@@ -63,7 +65,7 @@ def _generic_resolver(repo_dir: Path, row: BuildRow, globs: list[str]) -> list[P
     return found
 
 
-def _liblouis_resolver(repo_dir: Path, row: BuildRow) -> list[Path]:
+def _liblouis_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path]:
     exe = row.project
     choices = [
         repo_dir / "tools" / exe,
@@ -73,7 +75,7 @@ def _liblouis_resolver(repo_dir: Path, row: BuildRow) -> list[Path]:
     return [p for p in choices if p.exists() and is_real_binary_or_library(p)]
 
 
-def _libtiff_resolver(repo_dir: Path, row: BuildRow) -> list[Path]:
+def _libtiff_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path]:
     leaf = Path(row.file).stem
     choices = [
         repo_dir / "tools" / leaf,
@@ -85,7 +87,7 @@ def _libtiff_resolver(repo_dir: Path, row: BuildRow) -> list[Path]:
     return _generic_resolver(repo_dir, row, ["tools/*", "*/.libs/*.so*"])
 
 
-def _ffmpeg_resolver(repo_dir: Path, row: BuildRow) -> list[Path]:
+def _ffmpeg_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path]:
     choices = [repo_dir / "ffmpeg", repo_dir / "ffprobe", repo_dir / "ffplay"]
     return [p for p in choices if p.exists() and is_real_binary_or_library(p)]
 
@@ -97,7 +99,7 @@ def build_profiles() -> dict[str, BuildProfile]:
             name="openssl",
             repo_dir=Path(os.getenv("OPENSSL_DIR", "/home/user/openssl")),
             repo_url="https://github.com/openssl/openssl.git",
-            configure_cmd=["perl", "Configure", "linux-x86_64", "shared", "-g", "-O0"],
+            configure_cmd=["perl", "Configure", "linux-x86_64", "shared"],
             pre_steps=[],
             build_cmd=["make"],
             clean_cmd=["make", "clean"],
@@ -239,12 +241,12 @@ def build_profiles() -> dict[str, BuildProfile]:
             name="exiv2",
             repo_dir=Path(os.getenv("EXIV2_DIR", "/home/user/exiv2")),
             repo_url="https://github.com/Exiv2/exiv2.git",
-            configure_cmd=["cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_C_COMPILER=" + base["CC"], "-DCMAKE_CXX_COMPILER=" + base["CXX"]],
+            configure_cmd=["cmake", "-S", ".", "-B", "build_{compiler}_{opt}", "-DCMAKE_BUILD_TYPE=Release"],
             pre_steps=[],
-            build_cmd=["cmake", "--build", "build", "-j"],
-            clean_cmd=["cmake", "--build", "build", "--target", "clean"],
+            build_cmd=["cmake", "--build", "build_{compiler}_{opt}", "-j"],
+            clean_cmd=["cmake", "--build", "build_{compiler}_{opt}", "--target", "clean"],
             env_overrides=base,
-            artifact_globs=["build/bin/exiv2", "bin/exiv2"],
+            artifact_globs=["build_{compiler}_{opt}/bin/exiv2", "bin/exiv2"],
         ),
         "FFmpeg": BuildProfile(
             name="FFmpeg",
@@ -261,9 +263,9 @@ def build_profiles() -> dict[str, BuildProfile]:
     }
 
 
-def resolve_artifacts(profile: BuildProfile, row: BuildRow) -> list[Path]:
+def resolve_artifacts(profile: BuildProfile, row: BuildRow, ref_kind: str) -> list[Path]:
     if profile.artifact_resolver:
-        artifacts = profile.artifact_resolver(profile.repo_dir, row)
+        artifacts = profile.artifact_resolver(profile.repo_dir, row, ref_kind)
         if artifacts:
             return artifacts
     return _generic_resolver(profile.repo_dir, row, profile.artifact_globs)
