@@ -253,6 +253,19 @@ def _version_token(ref_kind: str) -> str:
     return ref_kind
 
 
+def _outputs_already_exist(ctx: BuildContext, row: BuildRow, ref_kind: str, variant: BuildVariant) -> bool:
+    out_dir = ctx.output_root / row.project / row.cve / ref_kind
+    if not out_dir.exists():
+        return False
+    arch = os.getenv("TARGET_ARCH", "x86")
+    version = _version_token(ref_kind)
+    suffix = f"_{row.project}-{version}_{variant.opt}_{arch}_{variant.compiler}"
+    for p in out_dir.iterdir():
+        if p.is_file() and suffix in p.name:
+            return True
+    return False
+
+
 def _emit_row_outputs(
     ctx: BuildContext,
     profile: BuildProfile,
@@ -292,6 +305,9 @@ def _process_commits(profile: BuildProfile, row: BuildRow, ctx: BuildContext) ->
         if not ref:
             _log_failure(ctx, row, kind, "parse_ref", "empty ref")
             continue
+        if _outputs_already_exist(ctx, row, kind, variant):
+            print(f"[skip] existing outputs found: project={row.project} cve={row.cve} ref_kind={kind} variant={variant.key}")
+            continue
         cache_files = _build_once(profile, row, ref, kind, variant, ctx)
         if cache_files:
             _emit_row_outputs(ctx, profile, row, kind, variant, cache_files)
@@ -318,6 +334,12 @@ def _process_releases(profile: BuildProfile, row: BuildRow, ctx: BuildContext) -
         ref = tag.tag
         kind = f"release_{tag.version_text}"
         for variant in variants:
+            if _outputs_already_exist(ctx, row, kind, variant):
+                print(
+                    f"[skip] existing outputs found: project={row.project} cve={row.cve} "
+                    f"ref_kind={kind} variant={variant.key}"
+                )
+                continue
             cache_files = _build_once(profile, row, ref, kind, variant, ctx)
             if cache_files:
                 _emit_row_outputs(ctx, profile, row, kind, variant, cache_files)
