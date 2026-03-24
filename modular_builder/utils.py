@@ -46,7 +46,13 @@ def run_cmd(
     print(f"[done] rc={result_code} elapsed={elapsed}s :: {cmd_text}")
 
     if result_code != 0:
-        return False, stderr_text.strip()
+        err = stderr_text.strip()
+        if err:
+            print("[stderr]")
+            print(err)
+        else:
+            print("[stderr] <empty>")
+        return False, err
     return True, ""
 
 
