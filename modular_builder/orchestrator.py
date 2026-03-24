@@ -180,8 +180,8 @@ def _default_variant(profile: BuildProfile) -> BuildVariant:
 def _release_variants() -> list[BuildVariant]:
     gcc = os.getenv("GCC_BIN", "/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-gcc")
     gpp = os.getenv("GPP_BIN", "/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-g++")
-    clang = os.getenv("CLANG_BIN", "/home/user/BinForge/tools/clang/clang-14.0.6/bin/clang")
-    clangpp = os.getenv("CLANGPP_BIN", clang + "++" if clang.endswith("clang") else "clang++")
+    clang = os.getenv("CLANG_BIN", "/home/user/BinForge/tools/clang/clang-13.0.1/bin/clang")
+    clangpp = os.getenv("CLANGPP_BIN", "/home/user/BinForge/tools/clang/clang-13.0.1/bin/clang++")
 
     variants: list[BuildVariant] = []
     for compiler, cc, cxx in [("gcc", gcc, gpp), ("clang", clang, clangpp)]:
