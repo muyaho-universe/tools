@@ -85,6 +85,14 @@ def parse_commit_hash(ref_or_url: str) -> str:
 
 
 def is_real_binary_or_library(path: Path) -> bool:
+    if not path.exists():
+        return False
+    if path.is_symlink():
+        try:
+            target = path.resolve(strict=True)
+        except OSError:
+            return False
+        return is_real_binary_or_library(target)
     if not path.is_file():
         return False
 

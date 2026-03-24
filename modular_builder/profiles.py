@@ -42,9 +42,17 @@ def _openssl_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path
     patterns = ["libcrypto.so*", "libssl.so*"]
     if not ref_kind.startswith("release_"):
         if row.file.startswith("crypto/"):
-            patterns = ["libcrypto.so*"]
+            patterns = ["libcrypto.so*", "libcrypto.a", "apps/openssl"]
         elif row.file.startswith("ssl/"):
-            patterns = ["libssl.so*"]
+            patterns = ["libssl.so*", "libssl.a", "apps/openssl"]
+    else:
+        patterns = [
+            "libcrypto.so*",
+            "libssl.so*",
+            "libcrypto.a",
+            "libssl.a",
+            "apps/openssl",
+        ]
     found: list[Path] = []
     for pattern in patterns:
         for p in sorted(repo_dir.glob(f"**/{pattern}")):

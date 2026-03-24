@@ -141,6 +141,21 @@ def _resolve_artifacts_for_variant(profile: BuildProfile, row: BuildRow, ref_kin
     return found
 
 
+def _debug_artifact_candidates(profile: BuildProfile, variant: BuildVariant) -> None:
+    print(f"[artifact-debug] project={profile.name} variant={variant.key}")
+    sample_patterns = ["**/*.so*", "**/*.a", "**/openssl", "**/tcpdump", "**/openvpn", "**/exiv2"]
+    shown = 0
+    for pattern in sample_patterns:
+        for p in sorted(profile.repo_dir.glob(pattern)):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(profile.repo_dir)
+            print(f"[artifact-candidate] {rel}")
+            shown += 1
+            if shown >= 30:
+                return
+
+
 def _build_once(
     profile: BuildProfile,
     row: BuildRow,
@@ -199,6 +214,7 @@ def _build_once(
 
         artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
         if not artifacts:
+            _debug_artifact_candidates(profile, variant)
             _log_failure(ctx, row, ref_kind, "artifact", "artifact not found")
             return []
 
