@@ -4,8 +4,11 @@ import csv
 import os
 import re
 import shutil
-from dataclasses import dataclass
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
 from pathlib import Path
+from threading import Lock
 
 from .models import BuildRow
 from .profiles import BuildProfile, build_profiles, resolve_artifacts
@@ -18,6 +21,8 @@ class BuildContext:
     output_root: Path
     failures: list[str]
     built_cache: set[tuple[str, str, str]]
+    parallel_workers: int
+    lock: Lock
 
 
 @dataclass(frozen=True)
@@ -150,9 +155,14 @@ def _build_once(
     )
     cache_key = (profile.name, ref, variant.key)
     cache_dir = ctx.output_root / "_cache" / profile.name / ref / variant.key
-    if cache_key in ctx.built_cache and cache_dir.exists():
+    cached_files = [p for p in cache_dir.iterdir() if p.is_file()] if cache_dir.exists() else []
+    if cached_files:
         print(f"[cache-hit] project={profile.name} ref={ref} variant={variant.key}")
-        return [p for p in cache_dir.iterdir() if p.is_file()]
+        return cached_files
+    with ctx.lock:
+        if cache_key in ctx.built_cache and cache_dir.exists():
+            print(f"[cache-hit] project={profile.name} ref={ref} variant={variant.key}")
+            return [p for p in cache_dir.iterdir() if p.is_file()]
 
     env = os.environ.copy()
     env.update(profile.env_overrides)
@@ -203,7 +213,8 @@ def _build_once(
             copied.append(dst)
         if not copied and cache_dir.exists():
             copied = [p for p in cache_dir.iterdir() if p.is_file()]
-        ctx.built_cache.add(cache_key)
+        with ctx.lock:
+            ctx.built_cache.add(cache_key)
         print(
             f"[build-done] project={profile.name} cve={row.cve} ref_kind={ref_kind} "
             f"ref={ref} variant={variant.key} artifacts={len(copied)}"
@@ -330,6 +341,7 @@ def _process_releases(profile: BuildProfile, row: BuildRow, ctx: BuildContext) -
 
     variants = _release_variants()
     print(f"[release-variants] count={len(variants)} (gcc/clang x O0..O3, no -g)")
+    tasks: list[tuple[str, str, BuildVariant]] = []
     for tag in tags:
         ref = tag.tag
         kind = f"release_{tag.version_text}"
@@ -340,9 +352,60 @@ def _process_releases(profile: BuildProfile, row: BuildRow, ctx: BuildContext) -
                     f"ref_kind={kind} variant={variant.key}"
                 )
                 continue
+            tasks.append((ref, kind, variant))
+
+    if ctx.parallel_workers <= 1:
+        for ref, kind, variant in tasks:
             cache_files = _build_once(profile, row, ref, kind, variant, ctx)
             if cache_files:
                 _emit_row_outputs(ctx, profile, row, kind, variant, cache_files)
+        return
+
+    worktree_root = ctx.output_root / "_worktrees"
+    with ThreadPoolExecutor(max_workers=ctx.parallel_workers) as ex:
+        futures = [
+            ex.submit(_build_once_isolated_worktree, profile, row, ref, kind, variant, ctx, worktree_root)
+            for ref, kind, variant in tasks
+        ]
+        for fut in as_completed(futures):
+            result = fut.result()
+            if not result:
+                continue
+            kind, variant, cache_files = result
+            if cache_files:
+                _emit_row_outputs(ctx, profile, row, kind, variant, cache_files)
+
+
+def _build_once_isolated_worktree(
+    profile: BuildProfile,
+    row: BuildRow,
+    ref: str,
+    kind: str,
+    variant: BuildVariant,
+    ctx: BuildContext,
+    worktree_root: Path,
+) -> tuple[str, BuildVariant, list[Path]] | None:
+    wt_name = f"{profile.name}_{kind}_{variant.key}_{uuid.uuid4().hex[:8]}"
+    wt_dir = worktree_root / wt_name
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    ok, err = run_cmd(
+        ["git", "worktree", "add", "--detach", "--force", str(wt_dir), ref],
+        cwd=profile.repo_dir,
+        quiet_stdout=False,
+    )
+    if not ok:
+        _log_failure(ctx, row, kind, "worktree_add", err)
+        return None
+
+    try:
+        local_profile = replace(profile, repo_dir=wt_dir)
+        cache_files = _build_once(local_profile, row, ref, kind, variant, ctx)
+        return kind, variant, cache_files
+    finally:
+        run_cmd(["git", "worktree", "remove", "--force", str(wt_dir)], cwd=profile.repo_dir, quiet_stdout=False)
+        if wt_dir.exists():
+            shutil.rmtree(wt_dir, ignore_errors=True)
 
 
 def run_pipeline(
@@ -351,9 +414,16 @@ def run_pipeline(
     only_project: str = "",
     mode: str = "all",
     clone_missing: bool = True,
+    parallel_workers: int = 1,
 ) -> list[str]:
     profiles = build_profiles()
-    ctx = BuildContext(output_root=Path(output_root), failures=[], built_cache=set())
+    ctx = BuildContext(
+        output_root=Path(output_root),
+        failures=[],
+        built_cache=set(),
+        parallel_workers=max(1, int(parallel_workers)),
+        lock=Lock(),
+    )
     ctx.output_root.mkdir(parents=True, exist_ok=True)
 
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:

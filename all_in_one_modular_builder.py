@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
         default="all",
         help="Build mode",
     )
+    p.add_argument("--parallel-workers", type=int, default=1, help="Parallel workers for release builds (worktree-based)")
     p.add_argument("--no-clone", action="store_true", help="Do not git clone missing project repositories")
     p.add_argument("--fail-log", default="all_in_one_failed_steps.txt", help="Failure log path")
     return p.parse_args()
@@ -33,6 +34,7 @@ def main() -> None:
         only_project=args.only_project,
         mode=args.mode,
         clone_missing=not args.no_clone,
+        parallel_workers=args.parallel_workers,
     )
 
     fail_log = Path(args.fail_log)

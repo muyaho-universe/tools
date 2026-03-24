@@ -34,10 +34,16 @@ def run_cmd(
                 return False, str(exc)
 
             start = time.time()
-            while proc.poll() is None:
-                elapsed = int(time.time() - start)
-                print(f"[running] {elapsed}s :: {cmd_text}")
-                time.sleep(10)
+            last_log = -1
+            while True:
+                try:
+                    proc.wait(timeout=1)
+                    break
+                except subprocess.TimeoutExpired:
+                    elapsed = int(time.time() - start)
+                    if elapsed // 10 != last_log:
+                        print(f"[running] {elapsed}s :: {cmd_text}")
+                        last_log = elapsed // 10
 
             result_code = proc.returncode or 0
             elapsed = int(time.time() - start)
