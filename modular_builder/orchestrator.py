@@ -281,9 +281,14 @@ def _version_token(ref_kind: str) -> str:
 
 
 def _outputs_already_exist(ctx: BuildContext, row: BuildRow, ref_kind: str, variant: BuildVariant) -> bool:
-    out_dir = ctx.output_root / row.project / ref_kind
+    out_dir = ctx.output_root / row.project
     if not out_dir.exists():
         return False
+
+    if ref_kind in {"patch", "vuln"}:
+        target = f"{row.cve}_{ref_kind}_{variant.compiler}_{variant.opt}"
+        return (out_dir / target).exists()
+
     arch = os.getenv("TARGET_ARCH", "x86")
     version = _version_token(ref_kind)
     suffix = f"_{row.project}-{version}_{variant.opt}_{arch}_{variant.compiler}"
@@ -301,7 +306,7 @@ def _emit_row_outputs(
     variant: BuildVariant,
     cache_files: list[Path],
 ) -> None:
-    out_dir = ctx.output_root / row.project / ref_kind
+    out_dir = ctx.output_root / row.project
     out_dir.mkdir(parents=True, exist_ok=True)
     opt = variant.opt
     compiler = variant.compiler
@@ -309,14 +314,34 @@ def _emit_row_outputs(
     version = _version_token(ref_kind)
     copied_count = 0
 
-    for idx, src in enumerate(cache_files, start=1):
+    files_to_emit = cache_files
+    if ref_kind in {"patch", "vuln"} and cache_files:
+        # OpenSSL commit output must be chosen by target file domain: crypto vs ssl.
+        if profile.name == "openssl":
+            preferred = None
+            if row.file.startswith("crypto/"):
+                preferred = next((p for p in cache_files if "libcrypto.so" in p.name), None)
+            elif row.file.startswith("ssl/"):
+                preferred = next((p for p in cache_files if "libssl.so" in p.name), None)
+
+            if preferred is None:
+                print(
+                    f"[out-skip] project={row.project} cve={row.cve} ref_kind={ref_kind} "
+                    f"reason=no matching openssl shared library for file={row.file}"
+                )
+                return
+            files_to_emit = [preferred]
+        else:
+            files_to_emit = [cache_files[0]]
+
+    for idx, src in enumerate(files_to_emit, start=1):
         if ref_kind in {"patch", "vuln"}:
             base_name = f"{row.cve}_{ref_kind}_{compiler}_{opt}"
         else:
             artifact_name = src.name
             base_name = f"{artifact_name}_{row.project}-{version}_{opt}_{arch}_{compiler}"
 
-        dst_name = base_name if len(cache_files) == 1 else f"{base_name}_{idx}"
+        dst_name = base_name if len(files_to_emit) == 1 else f"{base_name}_{idx}"
         dst = out_dir / dst_name
         if dst.exists():
             continue
