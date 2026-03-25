@@ -120,7 +120,8 @@ def is_real_binary_or_library(path: Path) -> bool:
         )
         desc = (result.stdout or "").lower()
     except OSError:
-        return path.suffix in {".a", ".so"} or os.access(path, os.X_OK)
+        base = path.name
+        return (".so" in base) or base.endswith(".a") or os.access(path, os.X_OK)
 
     if "elf" in desc:
         return True

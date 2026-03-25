@@ -15,6 +15,8 @@ from .profiles import BuildProfile, build_profiles, resolve_artifacts
 from .utils import is_real_binary_or_library, parse_commit_hash, run_cmd
 from .versioning import release_tags_in_range
 
+MAX_FAILURE_LOG_LINES = int(os.getenv("MAX_FAILURE_LOG_LINES", "40"))
+
 
 @dataclass
 class BuildContext:
@@ -37,7 +39,13 @@ class BuildVariant:
 
 
 def _log_failure(ctx: BuildContext, row: BuildRow, ref_kind: str, step: str, err: str) -> None:
-    one_line = " ".join((err or "").split())
+    err_text = (err or "").strip()
+    if err_text:
+        lines = [ln for ln in err_text.splitlines() if ln.strip()]
+        tail = lines[-MAX_FAILURE_LOG_LINES:] if len(lines) > MAX_FAILURE_LOG_LINES else lines
+        one_line = " \\n ".join(tail)
+    else:
+        one_line = ""
     msg = f"{row.project},{row.cve},{ref_kind},{step} fail"
     if one_line:
         msg = f"{msg} | {one_line}"
@@ -206,8 +214,16 @@ def _build_once(
         build_cmd = _render_tokens(profile.build_cmd, variant)
         if build_cmd == ["make"]:
             jobs = max(1, os.cpu_count() or 1)
+            if profile.name == "openssl" and variant.compiler == "clang":
+                jobs = 1
             build_cmd.append(f"-j{jobs}")
         ok, err = run_cmd(build_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "openssl":
+            # For old OpenSSL tags, full "make" can fail while library-only target still succeeds.
+            jobs = 1 if variant.compiler == "clang" else max(1, os.cpu_count() or 1)
+            retry_cmd = ["make", "build_libs", f"-j{jobs}"]
+            print(f"[retry] openssl build failed; trying: {' '.join(retry_cmd)}")
+            ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if not ok:
             _log_failure(ctx, row, ref_kind, "build", err)
             return []
@@ -255,10 +271,21 @@ def _release_variants() -> list[BuildVariant]:
     gpp = os.getenv("GPP_BIN", "/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-g++")
     clang = os.getenv("CLANG_BIN", "/home/user/BinForge/tools/clang/clang-13.0.1/bin/clang")
     clangpp = os.getenv("CLANGPP_BIN", "/home/user/BinForge/tools/clang/clang-13.0.1/bin/clang++")
+    llvm_ar = os.getenv("LLVM_AR_BIN", "/usr/bin/llvm-ar")
+    llvm_ranlib = os.getenv("LLVM_RANLIB_BIN", "/usr/bin/llvm-ranlib")
+    llvm_nm = os.getenv("LLVM_NM_BIN", "/usr/bin/llvm-nm")
 
     variants: list[BuildVariant] = []
     for compiler, cc, cxx in [("gcc", gcc, gpp), ("clang", clang, clangpp)]:
         for opt in ["O0", "O1", "O2", "O3"]:
+            extra: dict[str, str] = {}
+            if compiler == "clang":
+                # Keep binutils consistent with clang to avoid archive/object mismatch on old projects.
+                extra = {
+                    "AR": llvm_ar,
+                    "RANLIB": llvm_ranlib,
+                    "NM": llvm_nm,
+                }
             variants.append(
                 BuildVariant(
                     compiler=compiler,
@@ -268,6 +295,7 @@ def _release_variants() -> list[BuildVariant]:
                         "CXX": cxx,
                         "CFLAGS": f"-{opt}",
                         "CXXFLAGS": f"-{opt}",
+                        **extra,
                     },
                 )
             )
