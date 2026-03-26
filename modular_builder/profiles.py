@@ -39,14 +39,14 @@ def _default_env() -> dict[str, str]:
 
 
 def _openssl_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path]:
-    patterns = ["libcrypto.so*", "libssl.so*"]
+    patterns = ["libcrypto.so*", "libssl.so*", "libcrypto.a", "libssl.a"]
     if not ref_kind.startswith("release_"):
         if row.file.startswith("crypto/"):
-            patterns = ["libcrypto.so*"]
+            patterns = ["libcrypto.so*", "libcrypto.a"]
         elif row.file.startswith("ssl/"):
-            patterns = ["libssl.so*"]
+            patterns = ["libssl.so*", "libssl.a"]
     else:
-        patterns = ["libcrypto.so*", "libssl.so*"]
+        patterns = ["libcrypto.so*", "libssl.so*", "libcrypto.a", "libssl.a"]
     found: list[Path] = []
     for pattern in patterns:
         for p in sorted(repo_dir.glob(f"**/{pattern}")):
@@ -69,7 +69,9 @@ def _generic_resolver(repo_dir: Path, row: BuildRow, globs: list[str]) -> list[P
 def _liblouis_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path]:
     exe = row.project
     choices = [
+        repo_dir / "tools" / ".libs" / exe,
         repo_dir / "tools" / exe,
+        repo_dir / ".libs" / exe,
         repo_dir / exe,
         repo_dir / "bin" / exe,
     ]

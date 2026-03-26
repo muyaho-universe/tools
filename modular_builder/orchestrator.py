@@ -85,9 +85,23 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
 
     configure_path = profile.repo_dir / "configure"
     for step in profile.pre_steps:
-        if step and step[0].endswith("autogen.sh") and configure_path.exists():
+        if not step:
             continue
-        ok, err = run_cmd(step, cwd=profile.repo_dir, env=env)
+        cmd = list(step)
+        first = cmd[0]
+        first_path = profile.repo_dir / first
+
+        if first.endswith("autogen.sh") and configure_path.exists():
+            continue
+
+        if first.startswith("./") and first.endswith(".sh"):
+            if not first_path.exists():
+                print(f"[pre-step-skip] missing script: {first} (project={profile.name})")
+                continue
+            if not os.access(first_path, os.X_OK):
+                cmd = ["sh", first]
+
+        ok, err = run_cmd(cmd, cwd=profile.repo_dir, env=env)
         if not ok:
             return False, err
     return True, ""
@@ -224,6 +238,10 @@ def _build_once(
             retry_cmd = ["make", "build_libs", f"-j{jobs}"]
             print(f"[retry] openssl build failed; trying: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name in {"lou_trace", "lou_checktable", "lou_translate"}:
+            retry_cmd = ["make", "-C", "tools", profile.name]
+            print(f"[retry] {profile.name} build failed; trying focused target: {' '.join(retry_cmd)}")
+            ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if not ok:
             _log_failure(ctx, row, ref_kind, "build", err)
             return []
@@ -280,12 +298,27 @@ def _release_variants() -> list[BuildVariant]:
         for opt in ["O0", "O1", "O2", "O3"]:
             extra: dict[str, str] = {}
             if compiler == "clang":
-                # Keep binutils consistent with clang to avoid archive/object mismatch on old projects.
-                extra = {
-                    "AR": llvm_ar,
-                    "RANLIB": llvm_ranlib,
-                    "NM": llvm_nm,
-                }
+                # Keep binutils consistent with clang, but only pin tools that actually exist.
+                if os.path.isfile(llvm_ar):
+                    extra["AR"] = llvm_ar
+                elif shutil.which("llvm-ar"):
+                    extra["AR"] = "llvm-ar"
+                elif shutil.which("ar"):
+                    extra["AR"] = "ar"
+
+                if os.path.isfile(llvm_ranlib):
+                    extra["RANLIB"] = llvm_ranlib
+                elif shutil.which("llvm-ranlib"):
+                    extra["RANLIB"] = "llvm-ranlib"
+                elif shutil.which("ranlib"):
+                    extra["RANLIB"] = "ranlib"
+
+                if os.path.isfile(llvm_nm):
+                    extra["NM"] = llvm_nm
+                elif shutil.which("llvm-nm"):
+                    extra["NM"] = "llvm-nm"
+                elif shutil.which("nm"):
+                    extra["NM"] = "nm"
             variants.append(
                 BuildVariant(
                     compiler=compiler,
@@ -348,9 +381,9 @@ def _emit_row_outputs(
         if profile.name == "openssl":
             preferred = None
             if row.file.startswith("crypto/"):
-                preferred = next((p for p in cache_files if "libcrypto.so" in p.name), None)
+                preferred = next((p for p in cache_files if ("libcrypto.so" in p.name or p.name == "libcrypto.a")), None)
             elif row.file.startswith("ssl/"):
-                preferred = next((p for p in cache_files if "libssl.so" in p.name), None)
+                preferred = next((p for p in cache_files if ("libssl.so" in p.name or p.name == "libssl.a")), None)
 
             if preferred is None:
                 print(
