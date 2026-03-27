@@ -204,6 +204,7 @@ def _build_once(
     env = os.environ.copy()
     env.update(profile.env_overrides)
     env.update(variant.env_overrides)
+    openssl_release_mode = profile.name == "openssl" and ref_kind.startswith("release_")
 
     try:
         _hard_clean_repo(profile)
@@ -219,19 +220,32 @@ def _build_once(
             return []
 
         if profile.configure_cmd:
-            configure_cmd = _render_tokens(profile.configure_cmd, variant)
+            if openssl_release_mode:
+                # Old OpenSSL release tags are fragile with shared+asm across toolchains.
+                configure_cmd = ["perl", "Configure", "linux-x86_64", "no-shared", "no-asm"]
+            else:
+                configure_cmd = _render_tokens(profile.configure_cmd, variant)
             ok, err = run_cmd(configure_cmd, cwd=profile.repo_dir, env=env)
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
 
         build_cmd = _render_tokens(profile.build_cmd, variant)
+        if openssl_release_mode:
+            build_cmd = ["make", "build_libs"]
         if build_cmd == ["make"]:
             jobs = max(1, os.cpu_count() or 1)
             if profile.name == "openssl" and variant.compiler == "clang":
                 jobs = 1
             build_cmd.append(f"-j{jobs}")
+        if build_cmd and build_cmd[0] == "make" and not any(t.startswith("-j") for t in build_cmd[1:]):
+            jobs = 1 if (profile.name == "openssl" and variant.compiler == "clang") else max(1, os.cpu_count() or 1)
+            build_cmd.append(f"-j{jobs}")
         ok, err = run_cmd(build_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and openssl_release_mode and "No rule to make target" in (err or "") and "build_libs" in (err or ""):
+            retry_cmd = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
+            print(f"[retry] openssl release build_libs target missing; trying: {' '.join(retry_cmd)}")
+            ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name == "openssl":
             # For old OpenSSL tags, full "make" can fail while library-only target still succeeds.
             jobs = 1 if variant.compiler == "clang" else max(1, os.cpu_count() or 1)
@@ -446,7 +460,13 @@ def _process_releases(profile: BuildProfile, row: BuildRow, ctx: BuildContext) -
     )
 
     variants = _release_variants()
-    print(f"[release-variants] count={len(variants)} (gcc/clang x O0..O3, no -g)")
+    if profile.name == "openssl":
+        variants = [v for v in variants if v.compiler == "gcc"]
+        print("[release-variants] openssl: using gcc-only variants to avoid clang assembler incompatibilities")
+    if profile.name == "openssl":
+        print(f"[release-variants] count={len(variants)} (gcc x O0..O3, no -g)")
+    else:
+        print(f"[release-variants] count={len(variants)} (gcc/clang x O0..O3, no -g)")
     tasks: list[tuple[str, str, BuildVariant]] = []
     for tag in tags:
         ref = tag.tag
