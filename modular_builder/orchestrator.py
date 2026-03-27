@@ -253,9 +253,16 @@ def _build_once(
             print(f"[retry] openssl build failed; trying: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name in {"lou_trace", "lou_checktable", "lou_translate"}:
-            retry_cmd = ["make", profile.name]
-            print(f"[retry] {profile.name} build failed; trying focused target: {' '.join(retry_cmd)}")
-            ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+            target_path = f"tools/{profile.name}"
+            retry_plan = [
+                ["make", target_path],
+                ["make", "-C", "tools", profile.name],
+            ]
+            for retry_cmd in retry_plan:
+                print(f"[retry] {profile.name} build failed; trying focused target: {' '.join(retry_cmd)}")
+                ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                if ok:
+                    break
         if (not ok) and profile.name in {"lou_trace", "lou_checktable", "lou_translate"}:
             err_text = err or ""
             # Some liblouis tags fail a late optional dependency, but the requested tool binary
