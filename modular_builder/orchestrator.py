@@ -253,9 +253,21 @@ def _build_once(
             print(f"[retry] openssl build failed; trying: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name in {"lou_trace", "lou_checktable", "lou_translate"}:
-            retry_cmd = ["make", "-C", "tools", profile.name]
+            retry_cmd = ["make", profile.name]
             print(f"[retry] {profile.name} build failed; trying focused target: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name in {"lou_trace", "lou_checktable", "lou_translate"}:
+            err_text = err or ""
+            # Some liblouis tags fail a late optional dependency, but the requested tool binary
+            # may already be produced; in that case keep going and collect artifacts.
+            if "libbrlcheck.la" in err_text and "No rule to make target" in err_text:
+                prebuilt = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+                if prebuilt:
+                    print(
+                        f"[warn] {profile.name} build reported missing libbrlcheck, "
+                        f"but artifacts already exist ({len(prebuilt)}); continuing"
+                    )
+                    ok = True
         if not ok:
             _log_failure(ctx, row, ref_kind, "build", err)
             return []
