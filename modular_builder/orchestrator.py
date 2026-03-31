@@ -104,6 +104,20 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
         ok, err = run_cmd(cmd, cwd=profile.repo_dir, env=env)
         if not ok:
             return False, err
+
+    # Some historical tags do not ship ./configure, but can still generate it.
+    configure_missing = bool(profile.configure_cmd) and profile.configure_cmd[0] == "./configure" and not configure_path.exists()
+    if configure_missing:
+        autogen = profile.repo_dir / "autogen.sh"
+        if autogen.exists():
+            ok, err = run_cmd(["sh", "./autogen.sh"], cwd=profile.repo_dir, env=env)
+            if not ok:
+                return False, err
+        if not configure_path.exists() and ((profile.repo_dir / "configure.ac").exists() or (profile.repo_dir / "configure.in").exists()):
+            ok, err = run_cmd(["autoreconf", "-fi"], cwd=profile.repo_dir, env=env)
+            if not ok:
+                return False, err
+
     return True, ""
 
 
@@ -295,7 +309,7 @@ def _build_once(
     env = os.environ.copy()
     env.update(profile.env_overrides)
     env.update(variant.env_overrides)
-    openssl_release_mode = profile.name == "openssl" and ref_kind.startswith("release_")
+    openssl_safe_mode = profile.name == "openssl"
 
     try:
         _hard_clean_repo(profile)
@@ -311,7 +325,7 @@ def _build_once(
             return []
 
         if profile.configure_cmd:
-            if openssl_release_mode:
+            if openssl_safe_mode:
                 # Old OpenSSL release tags are fragile with shared+asm across toolchains.
                 configure_cmd = ["perl", "Configure", "linux-x86_64", "no-shared", "no-asm"]
             else:
@@ -331,7 +345,7 @@ def _build_once(
                     return []
 
         build_cmd = _render_tokens(profile.build_cmd, variant)
-        if openssl_release_mode:
+        if openssl_safe_mode:
             build_cmd = ["make", "build_libs"]
         if build_cmd == ["make"]:
             jobs = max(1, os.cpu_count() or 1)
@@ -342,7 +356,7 @@ def _build_once(
             jobs = 1 if (profile.name == "openssl" and variant.compiler == "clang") else max(1, os.cpu_count() or 1)
             build_cmd.append(f"-j{jobs}")
         ok, err = run_cmd(build_cmd, cwd=profile.repo_dir, env=env)
-        if (not ok) and openssl_release_mode and "No rule to make target" in (err or "") and "build_libs" in (err or ""):
+        if (not ok) and openssl_safe_mode and "No rule to make target" in (err or "") and "build_libs" in (err or ""):
             retry_cmd = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
             print(f"[retry] openssl release build_libs target missing; trying: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
@@ -375,6 +389,13 @@ def _build_once(
                         f"but artifacts already exist ({len(prebuilt)}); continuing"
                     )
                     ok = True
+        if (not ok) and profile.name == "pcf2bdf":
+            err_text = err or ""
+            if "No targets specified and no makefile found" in err_text:
+                cc = (env.get("CC") or "gcc").strip()
+                retry_cmd = [cc, "pcf2bdf.c", "-o", "pcf2bdf"]
+                print(f"[retry] pcf2bdf makefile missing; compiling directly: {' '.join(retry_cmd)}")
+                ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if not ok:
             _log_failure(ctx, row, ref_kind, "build", err)
             return []
