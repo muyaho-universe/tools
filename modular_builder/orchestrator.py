@@ -148,24 +148,24 @@ def _patch_liblouis_tool_dependency(repo_dir: Path) -> tuple[bool, str]:
         except OSError as exc:
             return False, str(exc)
 
-        needs_libb_stub = "libbrlcheck.la" in text and "../tools/libbrlcheck.la:" not in text
-        needs_slash_stub = "\\:" not in text
-        if not needs_libb_stub and not needs_slash_stub:
+        # Clean up any previously injected invalid stub that can break make parsing.
+        new_text = text.replace("\n\\:\n\t@true\n", "\n")
+        new_text = new_text.replace("\n\\:\n    @true\n", "\n")
+
+        needs_libb_stub = "libbrlcheck.la" in new_text and "../tools/libbrlcheck.la:" not in new_text
+        if not needs_libb_stub and new_text == text:
             continue
 
-        stub = ""
         if needs_libb_stub:
-            stub += "\n\n../tools/libbrlcheck.la:\n\t@true\n"
-        if needs_slash_stub:
-            stub += "\n\\:\n\t@true\n"
+            new_text += "\n\n../tools/libbrlcheck.la:\n\t@true\n"
         try:
-            path.write_text(text + stub, encoding="utf-8")
+            path.write_text(new_text, encoding="utf-8")
             changed_any = True
         except OSError as exc:
             return False, str(exc)
 
     if changed_any:
-        print("[liblouis-fix] added libbrlcheck.la stub target for legacy lou_trace builds")
+        print("[liblouis-fix] patched tools makefile for legacy lou_trace dependency")
     return True, ""
 
 
