@@ -148,16 +148,20 @@ def _patch_liblouis_tool_dependency(repo_dir: Path) -> tuple[bool, str]:
         except OSError as exc:
             return False, str(exc)
 
-        # Clean up any previously injected invalid stub that can break make parsing.
-        new_text = text.replace("\n\\:\n\t@true\n", "\n")
+        # Clean up any previously injected stubs to keep this idempotent.
+        new_text = text.replace("\n../tools/libbrlcheck.la:\n\t@true\n", "\n")
+        new_text = new_text.replace("\n../tools/libbrlcheck.la:\n    @true\n", "\n")
+        new_text = new_text.replace("\n\\:\n\t@true\n", "\n")
         new_text = new_text.replace("\n\\:\n    @true\n", "\n")
 
-        needs_libb_stub = "libbrlcheck.la" in new_text and "../tools/libbrlcheck.la:" not in new_text
+        needs_libb_stub = "libbrlcheck.la" in new_text
         if not needs_libb_stub and new_text == text:
             continue
 
         if needs_libb_stub:
-            new_text += "\n\n../tools/libbrlcheck.la:\n\t@true\n"
+            stub = "../tools/libbrlcheck.la:\n\t@true\n\n"
+            # Prepend stub so it cannot be captured by a trailing '\' line continuation at EOF.
+            new_text = stub + new_text
         try:
             path.write_text(new_text, encoding="utf-8")
             changed_any = True
