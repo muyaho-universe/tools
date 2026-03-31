@@ -139,10 +139,6 @@ def _patch_openssl_fileglob_issue(repo_dir: Path) -> tuple[bool, str]:
 def _patch_liblouis_tool_dependency(repo_dir: Path) -> tuple[bool, str]:
     targets = [repo_dir / "tools" / "Makefile", repo_dir / "tools" / "Makefile.in"]
     changed_any = False
-    patterns = [
-        re.compile(r"\s+\.\./tools/libbrlcheck\.la\b"),
-        re.compile(r"\s+\$\(top_builddir\)/tools/libbrlcheck\.la\b"),
-    ]
 
     for path in targets:
         if not path.exists():
@@ -152,19 +148,20 @@ def _patch_liblouis_tool_dependency(repo_dir: Path) -> tuple[bool, str]:
         except OSError as exc:
             return False, str(exc)
 
-        new_text = text
-        for pattern in patterns:
-            new_text = pattern.sub("", new_text)
+        if "libbrlcheck.la" not in text:
+            continue
+        if "../tools/libbrlcheck.la:" in text:
+            continue
 
-        if new_text != text:
-            try:
-                path.write_text(new_text, encoding="utf-8")
-                changed_any = True
-            except OSError as exc:
-                return False, str(exc)
+        stub = "\n\n../tools/libbrlcheck.la:\n\t@true\n"
+        try:
+            path.write_text(text + stub, encoding="utf-8")
+            changed_any = True
+        except OSError as exc:
+            return False, str(exc)
 
     if changed_any:
-        print("[liblouis-fix] removed stale libbrlcheck.la dependency from tools makefiles")
+        print("[liblouis-fix] added libbrlcheck.la stub target for legacy lou_trace builds")
     return True, ""
 
 
