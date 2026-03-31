@@ -275,7 +275,17 @@ def _find_pcf2bdf_source(repo_dir: Path) -> Path | None:
     for p in sorted(repo_dir.glob("**/*.c")):
         if "pcf2bdf" in p.name.lower():
             return p
+    for p in sorted(repo_dir.glob("**/*.cc")):
+        if "pcf2bdf" in p.name.lower():
+            return p
+    for p in sorted(repo_dir.glob("**/*.cpp")):
+        if "pcf2bdf" in p.name.lower():
+            return p
     for p in sorted(repo_dir.glob("*.c")):
+        return p
+    for p in sorted(repo_dir.glob("*.cc")):
+        return p
+    for p in sorted(repo_dir.glob("*.cpp")):
         return p
     return None
 
@@ -342,15 +352,25 @@ def _build_once(
                 configure_cmd = ["perl", "Configure", "linux-x86_64", "no-shared", "no-asm"]
             else:
                 configure_cmd = _render_tokens(profile.configure_cmd, variant)
-            ok, err = run_cmd(configure_cmd, cwd=profile.repo_dir, env=env)
+            ok, err = run_cmd(
+                configure_cmd,
+                cwd=profile.repo_dir,
+                env=env,
+                quiet_stdout=(profile.name != "FFmpeg"),
+            )
             if (not ok) and profile.name == "freetype":
-                fallback_cfg = ["sh", "builds/unix/configure.raw"]
+                # Older freetype tags can bootstrap via make setup even without ./configure.
+                fallback_cfg = ["make", "setup"]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
             if (not ok) and profile.name == "FFmpeg" and not (err or "").strip():
-                fallback_cfg = ["sh", "./configure", "--disable-shared", "--enable-static", "--disable-werror"]
+                fallback_cfg = ["bash", "./configure", "--disable-shared", "--enable-static", "--disable-werror"]
                 print(f"[retry] FFmpeg configure returned empty stderr; trying: {' '.join(fallback_cfg)}")
-                ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
+                ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
+            if (not ok) and profile.name == "FFmpeg":
+                fallback_cfg = ["sh", "./configure", "--disable-shared", "--enable-static", "--disable-werror"]
+                print(f"[retry] FFmpeg configure fallback: {' '.join(fallback_cfg)}")
+                ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
@@ -419,6 +439,23 @@ def _build_once(
                     retry_cmd = [cc, str(src_rel), "-o", "pcf2bdf"]
                     print(f"[retry] pcf2bdf makefile missing; compiling directly: {' '.join(retry_cmd)}")
                     ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                    if (not ok) and src_rel.suffix in {".cc", ".cpp"}:
+                        cxx = (env.get("CXX") or "g++").strip()
+                        retry_cmd = [cxx, str(src_rel), "-o", "pcf2bdf"]
+                        print(f"[retry] pcf2bdf retry with CXX: {' '.join(retry_cmd)}")
+                        ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "openvpn":
+            err_text = err or ""
+            if "pulled_options_state" in err_text or "HMAC_Init_ex" in err_text or "deprecated-declarations" in err_text:
+                # Try crypto backend fallback for environments with OpenSSL 3-only headers.
+                fallback_cfg = ["./configure", "--disable-plugin-auth-pam", "--with-crypto-library=mbedtls"]
+                print(f"[retry] openvpn OpenSSL compatibility issue; trying: {' '.join(fallback_cfg)}")
+                ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
+                if ok:
+                    retry_build = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                else:
+                    err = cfg_err or err
         if not ok:
             _log_failure(ctx, row, ref_kind, "build", err)
             return []
