@@ -117,6 +117,13 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
             ok, err = run_cmd(["autoreconf", "-fi"], cwd=profile.repo_dir, env=env)
             if not ok:
                 return False, err
+        if (not configure_path.exists()) and profile.name == "freetype":
+            raw = profile.repo_dir / "builds" / "unix" / "configure.raw"
+            if raw.exists():
+                # Older freetype tags often require bash for configure.raw.
+                ok, err = run_cmd(["bash", "-c", "cd builds/unix && ./configure.raw"], cwd=profile.repo_dir, env=env)
+                if not ok:
+                    return False, err
 
     return True, ""
 
@@ -447,15 +454,33 @@ def _build_once(
         if (not ok) and profile.name == "openvpn":
             err_text = err or ""
             if "pulled_options_state" in err_text or "HMAC_Init_ex" in err_text or "deprecated-declarations" in err_text:
-                # Try crypto backend fallback for environments with OpenSSL 3-only headers.
-                fallback_cfg = ["./configure", "--disable-plugin-auth-pam", "--with-crypto-library=mbedtls"]
-                print(f"[retry] openvpn OpenSSL compatibility issue; trying: {' '.join(fallback_cfg)}")
-                ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
-                if ok:
-                    retry_build = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
-                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
-                else:
-                    err = cfg_err or err
+                # First try mbedtls only when it's available.
+                has_mbedtls = (profile.repo_dir / "/usr/include/mbedtls").exists()
+                if shutil.which("pkg-config"):
+                    pc_ok, _ = run_cmd(["pkg-config", "--exists", "mbedtls"], cwd=profile.repo_dir, env=env)
+                    has_mbedtls = has_mbedtls or pc_ok
+                if has_mbedtls:
+                    fallback_cfg = ["./configure", "--disable-plugin-auth-pam", "--with-crypto-library=mbedtls"]
+                    print(f"[retry] openvpn OpenSSL compatibility issue; trying: {' '.join(fallback_cfg)}")
+                    ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
+                    if ok:
+                        retry_build = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
+                        ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                    else:
+                        err = cfg_err or err
+                if not ok:
+                    # Fallback to openssl build with relaxed deprecation handling.
+                    compat_env = dict(env)
+                    compat_env["CFLAGS"] = (compat_env.get("CFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10100000L").strip()
+                    compat_env["CXXFLAGS"] = (compat_env.get("CXXFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10100000L").strip()
+                    compat_cfg = ["./configure", "--disable-plugin-auth-pam", "--with-crypto-library=openssl"]
+                    print(f"[retry] openvpn mbedtls unavailable/failed; trying openssl-compat flags")
+                    ok, cfg_err = run_cmd(compat_cfg, cwd=profile.repo_dir, env=compat_env)
+                    if ok:
+                        retry_build = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
+                        ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=compat_env)
+                    else:
+                        err = cfg_err or err
         if not ok:
             _log_failure(ctx, row, ref_kind, "build", err)
             return []
