@@ -148,12 +148,16 @@ def _patch_liblouis_tool_dependency(repo_dir: Path) -> tuple[bool, str]:
         except OSError as exc:
             return False, str(exc)
 
-        if "libbrlcheck.la" not in text:
-            continue
-        if "../tools/libbrlcheck.la:" in text:
+        needs_libb_stub = "libbrlcheck.la" in text and "../tools/libbrlcheck.la:" not in text
+        needs_slash_stub = "\\:" not in text
+        if not needs_libb_stub and not needs_slash_stub:
             continue
 
-        stub = "\n\n../tools/libbrlcheck.la:\n\t@true\n"
+        stub = ""
+        if needs_libb_stub:
+            stub += "\n\n../tools/libbrlcheck.la:\n\t@true\n"
+        if needs_slash_stub:
+            stub += "\n\\:\n\t@true\n"
         try:
             path.write_text(text + stub, encoding="utf-8")
             changed_any = True
