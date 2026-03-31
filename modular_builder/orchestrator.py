@@ -268,6 +268,18 @@ def _resolve_artifacts_for_variant(profile: BuildProfile, row: BuildRow, ref_kin
     return found
 
 
+def _find_pcf2bdf_source(repo_dir: Path) -> Path | None:
+    direct = repo_dir / "pcf2bdf.c"
+    if direct.exists():
+        return direct
+    for p in sorted(repo_dir.glob("**/*.c")):
+        if "pcf2bdf" in p.name.lower():
+            return p
+    for p in sorted(repo_dir.glob("*.c")):
+        return p
+    return None
+
+
 def _debug_artifact_candidates(profile: BuildProfile, variant: BuildVariant) -> None:
     print(f"[artifact-debug] project={profile.name} variant={variant.key}")
     sample_patterns = ["**/*.so*", "**/*.a", "**/openssl", "**/tcpdump", "**/openvpn", "**/exiv2"]
@@ -331,6 +343,14 @@ def _build_once(
             else:
                 configure_cmd = _render_tokens(profile.configure_cmd, variant)
             ok, err = run_cmd(configure_cmd, cwd=profile.repo_dir, env=env)
+            if (not ok) and profile.name == "freetype":
+                fallback_cfg = ["sh", "builds/unix/configure.raw"]
+                print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
+                ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
+            if (not ok) and profile.name == "FFmpeg" and not (err or "").strip():
+                fallback_cfg = ["sh", "./configure", "--disable-shared", "--enable-static", "--disable-werror"]
+                print(f"[retry] FFmpeg configure returned empty stderr; trying: {' '.join(fallback_cfg)}")
+                ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
@@ -393,9 +413,12 @@ def _build_once(
             err_text = err or ""
             if "No targets specified and no makefile found" in err_text:
                 cc = (env.get("CC") or "gcc").strip()
-                retry_cmd = [cc, "pcf2bdf.c", "-o", "pcf2bdf"]
-                print(f"[retry] pcf2bdf makefile missing; compiling directly: {' '.join(retry_cmd)}")
-                ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                src = _find_pcf2bdf_source(profile.repo_dir)
+                if src:
+                    src_rel = src.relative_to(profile.repo_dir)
+                    retry_cmd = [cc, str(src_rel), "-o", "pcf2bdf"]
+                    print(f"[retry] pcf2bdf makefile missing; compiling directly: {' '.join(retry_cmd)}")
+                    ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if not ok:
             _log_failure(ctx, row, ref_kind, "build", err)
             return []
