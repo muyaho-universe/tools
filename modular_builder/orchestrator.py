@@ -136,6 +136,38 @@ def _patch_openssl_fileglob_issue(repo_dir: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _patch_liblouis_tool_dependency(repo_dir: Path) -> tuple[bool, str]:
+    targets = [repo_dir / "tools" / "Makefile", repo_dir / "tools" / "Makefile.in"]
+    changed_any = False
+    patterns = [
+        re.compile(r"\s+\.\./tools/libbrlcheck\.la\b"),
+        re.compile(r"\s+\$\(top_builddir\)/tools/libbrlcheck\.la\b"),
+    ]
+
+    for path in targets:
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return False, str(exc)
+
+        new_text = text
+        for pattern in patterns:
+            new_text = pattern.sub("", new_text)
+
+        if new_text != text:
+            try:
+                path.write_text(new_text, encoding="utf-8")
+                changed_any = True
+            except OSError as exc:
+                return False, str(exc)
+
+    if changed_any:
+        print("[liblouis-fix] removed stale libbrlcheck.la dependency from tools makefiles")
+    return True, ""
+
+
 def _render_tokens(tokens: list[str], variant: BuildVariant) -> list[str]:
     rendered: list[str] = []
     for token in tokens:
@@ -229,6 +261,11 @@ def _build_once(
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
+            if profile.name in {"lou_trace", "lou_checktable", "lou_translate"}:
+                ok, err = _patch_liblouis_tool_dependency(profile.repo_dir)
+                if not ok:
+                    _log_failure(ctx, row, ref_kind, "configure_patch", err)
+                    return []
 
         build_cmd = _render_tokens(profile.build_cmd, variant)
         if openssl_release_mode:
