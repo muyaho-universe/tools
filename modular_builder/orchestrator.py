@@ -42,8 +42,13 @@ def _log_failure(ctx: BuildContext, row: BuildRow, ref_kind: str, step: str, err
     err_text = (err or "").strip()
     if err_text:
         lines = [ln for ln in err_text.splitlines() if ln.strip()]
-        tail = lines[-MAX_FAILURE_LOG_LINES:] if len(lines) > MAX_FAILURE_LOG_LINES else lines
-        one_line = " \\n ".join(tail)
+        # Prefer compiler/configure error lines, otherwise keep the tail.
+        sig = [ln for ln in lines if ("error:" in ln.lower()) or ("undefined reference" in ln.lower()) or ("fatal:" in ln.lower())]
+        if sig:
+            picked = sig[-MAX_FAILURE_LOG_LINES:]
+        else:
+            picked = lines[-MAX_FAILURE_LOG_LINES:] if len(lines) > MAX_FAILURE_LOG_LINES else lines
+        one_line = " \\n ".join(picked)
     else:
         one_line = ""
     msg = f"{row.project},{row.cve},{ref_kind},{step} fail"
@@ -131,6 +136,9 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
                     ok, err = run_cmd(["autoreconf", "-fi"], cwd=profile.repo_dir, env=env)
                     if not ok:
                         return False, err
+            ok, err = _ensure_autotools_aux_files(profile.repo_dir / "builds" / "unix", env)
+            if not ok:
+                return False, err
 
     return True, ""
 
@@ -200,6 +208,46 @@ def _looks_like_autoconf_input(path: Path) -> bool:
         return False
     head = "\n".join(text.splitlines()[:40])
     return "AC_INIT(" in head or "AC_PREREQ(" in head
+
+
+def _ensure_autotools_aux_files(base_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
+    names = ["install-sh", "config.guess", "config.sub"]
+    missing = [n for n in names if not (base_dir / n).exists()]
+    if not missing:
+        return True, ""
+
+    # Try autotools installer first.
+    ok, err = run_cmd(["autoreconf", "-fvi"], cwd=base_dir, env=env)
+    if ok:
+        missing = [n for n in names if not (base_dir / n).exists()]
+        if not missing:
+            return True, ""
+
+    # Fallback: copy system copies when available.
+    candidates = [
+        Path("/usr/share/automake-1.16"),
+        Path("/usr/share/automake-1.15"),
+        Path("/usr/share/misc"),
+    ]
+    for name in list(missing):
+        copied = False
+        for root in candidates:
+            src = root / name
+            if src.exists():
+                try:
+                    shutil.copy2(src, base_dir / name)
+                    if name == "install-sh":
+                        run_cmd(["chmod", "+x", str(base_dir / name)], cwd=base_dir, env=env)
+                    copied = True
+                    break
+                except OSError:
+                    continue
+        if copied:
+            missing.remove(name)
+
+    if missing:
+        return False, f"missing autotools auxiliary files: {', '.join(missing)}"
+    return True, ""
 
 
 def _patch_openssl_fileglob_issue(repo_dir: Path) -> tuple[bool, str]:
@@ -438,7 +486,12 @@ def _build_once(
                 unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
                 raw_cfg = profile.repo_dir / "builds" / "unix" / "configure.raw"
                 if unix_cfg.exists() and not _looks_like_autoconf_input(unix_cfg):
-                    configure_cmd = ["bash", "builds/unix/configure"]
+                    ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir / "builds" / "unix", env)
+                    if not ok:
+                        err = aux_err
+                        configure_cmd = []
+                    else:
+                        configure_cmd = ["bash", "builds/unix/configure"]
                 elif raw_cfg.exists():
                     configure_cmd = ["bash", "-lc", "cd builds/unix && autoconf -o configure configure.raw && chmod +x configure && bash ./configure"]
                 else:
@@ -454,11 +507,18 @@ def _build_once(
                 ok, err = True, ""
             if (not ok) and profile.name == "freetype":
                 # Freetype tags vary; force unix configure path directly.
-                fallback_cfg = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && bash ./configure"]
+                fallback_cfg = [
+                    "bash",
+                    "-lc",
+                    "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && "
+                    "(autoreconf -fvi || true) && bash ./configure",
+                ]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
             if (not ok) and profile.name == "openvpn":
                 cfg_retries = [
+                    ["./configure", "--disable-plugin-auth-pam", "--disable-comp-lzo", "--disable-lz4"],
+                    ["./configure", "--disable-plugin-auth-pam", "--disable-comp-lzo"],
                     ["./configure", "--disable-plugin-auth-pam", "--disable-lzo", "--disable-lz4"],
                     ["./configure", "--disable-plugin-auth-pam", "--disable-lzo"],
                     ["./configure", "--disable-plugin-auth-pam", "--enable-lzo=no", "--enable-lz4=no"],
@@ -542,6 +602,14 @@ def _build_once(
             retry_cmd = ["make", "build_libs", f"-j{jobs}"]
             print(f"[retry] openssl build failed; trying: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "FFmpeg":
+            retry_cmd = ["make", "-j1"]
+            print(f"[retry] FFmpeg build failed; retry single-thread: {' '.join(retry_cmd)}")
+            ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "FFmpeg":
+            retry_cmd = ["make", "-j1", "V=1"]
+            print(f"[retry] FFmpeg build failed; retry verbose single-thread: {' '.join(retry_cmd)}")
+            ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name in {"lou_trace", "lou_checktable", "lou_translate"}:
             target_path = f"tools/{profile.name}"
             retry_plan = [
@@ -603,6 +671,8 @@ def _build_once(
             if "lzo enabled but missing" in err_text:
                 run_cmd(["make", "distclean"], cwd=profile.repo_dir, env=env)
                 lzo_retries = [
+                    ["./configure", "--disable-plugin-auth-pam", "--disable-comp-lzo", "--disable-lz4"],
+                    ["./configure", "--disable-plugin-auth-pam", "--disable-comp-lzo"],
                     ["./configure", "--disable-plugin-auth-pam", "--disable-lzo", "--disable-lz4"],
                     ["./configure", "--disable-plugin-auth-pam", "--disable-lzo"],
                     ["./configure", "--disable-plugin-auth-pam", "--enable-lzo=no", "--enable-lz4=no"],

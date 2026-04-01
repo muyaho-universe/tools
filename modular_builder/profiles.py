@@ -158,7 +158,7 @@ def build_profiles() -> dict[str, BuildProfile]:
             name="openvpn",
             repo_dir=Path(os.getenv("OPENVPN_DIR", "/home/user/openvpn")),
             repo_url="https://github.com/OpenVPN/openvpn.git",
-            configure_cmd=["./configure", "--disable-plugin-auth-pam", "--disable-lzo", "--disable-lz4"],
+            configure_cmd=["./configure", "--disable-plugin-auth-pam", "--disable-comp-lzo", "--disable-lz4"],
             pre_steps=[["./autogen.sh"]],
             build_cmd=["make"],
             clean_cmd=["make", "clean"],
