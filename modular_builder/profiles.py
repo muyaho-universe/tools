@@ -261,7 +261,7 @@ def build_profiles() -> dict[str, BuildProfile]:
             name="FFmpeg",
             repo_dir=Path(os.getenv("FFMPEG_DIR", "/home/user/FFmpeg")),
             repo_url="https://github.com/FFmpeg/FFmpeg.git",
-            configure_cmd=["sh", "./configure", "--disable-shared", "--enable-static", "--disable-werror", "--disable-x86asm"],
+            configure_cmd=["sh", "./configure", "--disable-shared", "--enable-static", "--disable-werror", "--disable-asm"],
             pre_steps=[],
             build_cmd=["make"],
             clean_cmd=["make", "clean"],

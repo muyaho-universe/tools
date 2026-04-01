@@ -118,22 +118,17 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
             if not ok:
                 return False, err
         if (not configure_path.exists()) and profile.name == "freetype":
+            # Old freetype tags do not have top-level ./configure; they use builds/unix/configure(.raw).
+            unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
             raw = profile.repo_dir / "builds" / "unix" / "configure.raw"
-            if raw.exists():
-                # Older freetype tags often require bash for configure.raw.
-                ok, err = run_cmd(["bash", "-c", "cd builds/unix && ./configure.raw"], cwd=profile.repo_dir, env=env)
+            if (not unix_cfg.exists()) and raw.exists():
+                ok, err = run_cmd(
+                    ["sh", "-c", "cd builds/unix && cp configure.raw configure && chmod +x configure"],
+                    cwd=profile.repo_dir,
+                    env=env,
+                )
                 if not ok:
                     return False, err
-                unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
-                if not unix_cfg.exists():
-                    # Some tags keep only configure.raw; create configure expected by detect.mk.
-                    ok, err = run_cmd(
-                        ["sh", "-c", "cd builds/unix && cp configure.raw configure && chmod +x configure"],
-                        cwd=profile.repo_dir,
-                        env=env,
-                    )
-                    if not ok:
-                        return False, err
 
     return True, ""
 
@@ -428,9 +423,15 @@ def _build_once(
             else:
                 configure_cmd = _render_tokens(profile.configure_cmd, variant)
             if profile.name == "freetype" and not (profile.repo_dir / "configure").exists():
-                # Old freetype tags build via top-level make + builds/unix/configure(.raw).
-                # Running ./configure at repo root is invalid for those tags.
-                configure_cmd = []
+                # Old freetype tags build via builds/unix/configure(.raw).
+                unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
+                raw_cfg = profile.repo_dir / "builds" / "unix" / "configure.raw"
+                if unix_cfg.exists():
+                    configure_cmd = ["sh", "builds/unix/configure"]
+                elif raw_cfg.exists():
+                    configure_cmd = ["sh", "builds/unix/configure.raw"]
+                else:
+                    configure_cmd = []
             if configure_cmd:
                 ok, err = run_cmd(
                     configure_cmd,
@@ -441,8 +442,8 @@ def _build_once(
             else:
                 ok, err = True, ""
             if (not ok) and profile.name == "freetype":
-                # Freetype tags vary; if configure.raw exists, materialize builds/unix/configure.
-                fallback_cfg = ["sh", "-c", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure)"]
+                # Freetype tags vary; force unix configure path directly.
+                fallback_cfg = ["sh", "-c", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure) && sh ./configure"]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
             if (not ok) and profile.name == "FFmpeg" and not (err or "").strip():
@@ -452,7 +453,7 @@ def _build_once(
                     "--disable-shared",
                     "--enable-static",
                     "--disable-werror",
-                    "--disable-x86asm",
+                    "--disable-asm",
                 ]
                 print(f"[retry] FFmpeg configure returned empty stderr; trying: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
@@ -463,6 +464,7 @@ def _build_once(
                     "--disable-shared",
                     "--enable-static",
                     "--disable-werror",
+                    "--disable-asm",
                     "--disable-x86asm",
                 ]
                 print(f"[retry] FFmpeg configure fallback: {' '.join(fallback_cfg)}")
@@ -542,8 +544,13 @@ def _build_once(
                         ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name == "freetype":
             err_text = err or ""
-            if "detect.mk" in err_text or "./configure: not found" in err_text:
-                bootstrap_cmd = ["sh", "-c", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure)"]
+            if (
+                "detect.mk" in err_text
+                or "./configure: not found" in err_text
+                or "unix-cc.mk" in err_text
+                or "Permission denied" in err_text
+            ):
+                bootstrap_cmd = ["sh", "-c", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure) && sh ./configure"]
                 print(f"[retry] freetype build failed; trying bootstrap: {' '.join(bootstrap_cmd)}")
                 setup_ok, setup_err = run_cmd(bootstrap_cmd, cwd=profile.repo_dir, env=env)
                 if setup_ok:
@@ -554,6 +561,22 @@ def _build_once(
                     err = setup_err or err
         if (not ok) and profile.name == "openvpn":
             err_text = err or ""
+            if "lzo enabled but missing" in err_text:
+                lzo_retries = [
+                    ["./configure", "--disable-plugin-auth-pam", "--disable-lzo", "--disable-lz4"],
+                    ["./configure", "--disable-plugin-auth-pam", "--disable-lzo"],
+                    ["./configure", "--disable-plugin-auth-pam", "--without-lzo"],
+                ]
+                for fallback_cfg in lzo_retries:
+                    print(f"[retry] openvpn missing lzo; trying: {' '.join(fallback_cfg)}")
+                    ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
+                    if not ok:
+                        err = cfg_err or err
+                        continue
+                    retry_build = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                    if ok:
+                        break
             if (
                 "pulled_options_state" in err_text
                 or "HMAC_Init_ex" in err_text
