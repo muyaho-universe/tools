@@ -165,8 +165,6 @@ def build_profiles() -> dict[str, BuildProfile]:
             env_overrides={
                 **base,
                 "PKG_CONFIG_PATH": "/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/share/pkgconfig:" + os.getenv("PKG_CONFIG_PATH", ""),
-                "CPPFLAGS": "-I/usr/local/include",
-                "LDFLAGS": "-L/usr/local/lib -L/usr/local/lib64",
             },
             artifact_globs=["src/openvpn/openvpn", "src/openvpn"],
         ),

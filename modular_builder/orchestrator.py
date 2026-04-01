@@ -165,6 +165,12 @@ def _detect_openssl_legacy_prefix() -> Path | None:
 
 def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
     compat_env = dict(base_env)
+    # Drop forced /usr/local OpenSSL include/lib paths; many environments keep OpenSSL 3.x there.
+    cpp_tokens = [t for t in compat_env.get("CPPFLAGS", "").split() if "/usr/local/include" not in t]
+    ld_tokens = [t for t in compat_env.get("LDFLAGS", "").split() if "/usr/local/lib" not in t and "/usr/local/lib64" not in t]
+    compat_env["CPPFLAGS"] = " ".join(cpp_tokens).strip()
+    compat_env["LDFLAGS"] = " ".join(ld_tokens).strip()
+
     legacy_prefix = _detect_openssl_legacy_prefix()
     if legacy_prefix:
         include_dir = legacy_prefix / "include"
@@ -179,6 +185,8 @@ def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
         compat_env["PKG_CONFIG_PATH"] = f"{lib_dir}/pkgconfig:{lib64_dir}/pkgconfig:{pkg}".strip(":")
         compat_env["LD_LIBRARY_PATH"] = f"{lib_dir}:{lib64_dir}:{ld_lib}".strip(":")
         print(f"[openvpn-fix] using legacy OpenSSL prefix: {legacy_prefix}")
+    else:
+        print("[openvpn-fix] legacy OpenSSL prefix not found; retrying without /usr/local OpenSSL paths")
     compat_env["CFLAGS"] = (
         compat_env.get("CFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10100000L"
     ).strip()
@@ -419,15 +427,22 @@ def _build_once(
                 configure_cmd = ["perl", "Configure", "linux-x86_64", "no-shared", "no-asm"]
             else:
                 configure_cmd = _render_tokens(profile.configure_cmd, variant)
-            ok, err = run_cmd(
-                configure_cmd,
-                cwd=profile.repo_dir,
-                env=env,
-                quiet_stdout=(profile.name != "FFmpeg"),
-            )
+            if profile.name == "freetype" and not (profile.repo_dir / "configure").exists():
+                # Old freetype tags build via top-level make + builds/unix/configure(.raw).
+                # Running ./configure at repo root is invalid for those tags.
+                configure_cmd = []
+            if configure_cmd:
+                ok, err = run_cmd(
+                    configure_cmd,
+                    cwd=profile.repo_dir,
+                    env=env,
+                    quiet_stdout=(profile.name != "FFmpeg"),
+                )
+            else:
+                ok, err = True, ""
             if (not ok) and profile.name == "freetype":
-                # Older freetype tags expect setup in builds/unix, not at repo root.
-                fallback_cfg = ["make", "-C", "builds/unix", "setup"]
+                # Freetype tags vary; if configure.raw exists, materialize builds/unix/configure.
+                fallback_cfg = ["sh", "-c", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure)"]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
             if (not ok) and profile.name == "FFmpeg" and not (err or "").strip():
@@ -528,11 +543,11 @@ def _build_once(
         if (not ok) and profile.name == "freetype":
             err_text = err or ""
             if "detect.mk" in err_text or "./configure: not found" in err_text:
-                bootstrap_cmd = ["make", "-C", "builds/unix", "setup"]
+                bootstrap_cmd = ["sh", "-c", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure)"]
                 print(f"[retry] freetype build failed; trying bootstrap: {' '.join(bootstrap_cmd)}")
                 setup_ok, setup_err = run_cmd(bootstrap_cmd, cwd=profile.repo_dir, env=env)
                 if setup_ok:
-                    retry_build = [build_cmd[0], *[x for x in build_cmd[1:] if x != "setup"]]
+                    retry_build = list(build_cmd)
                     print(f"[retry] freetype bootstrap done; retry build: {' '.join(retry_build)}")
                     ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
                 else:
