@@ -110,6 +110,12 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
         if not ok:
             return False, err
 
+    if profile.name == "openvpn":
+        # Patch legacy configure defaults before running configure retries.
+        ok, err = _patch_openvpn_disable_lzo(profile.repo_dir)
+        if not ok:
+            return False, err
+
     # Some historical tags do not ship ./configure, but can still generate it.
     configure_missing = bool(profile.configure_cmd) and profile.configure_cmd[0] == "./configure" and not configure_path.exists()
     if configure_missing:
@@ -576,7 +582,7 @@ def _build_once(
                         err = aux_err
                         configure_cmd = []
                     else:
-                        configure_cmd = ["bash", "builds/unix/configure"]
+                        configure_cmd = ["bash", "-lc", "cd builds/unix && ./configure"]
                 elif raw_cfg.exists():
                     configure_cmd = ["bash", "-lc", "cd builds/unix && autoconf -o configure configure.raw && chmod +x configure && bash ./configure"]
                 else:
@@ -596,7 +602,7 @@ def _build_once(
                     "bash",
                     "-lc",
                     "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && "
-                    "(autoreconf -fvi || true) && bash ./configure",
+                    "bash ./configure",
                 ]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
