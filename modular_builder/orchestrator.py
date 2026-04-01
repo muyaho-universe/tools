@@ -427,9 +427,9 @@ def _build_once(
                 unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
                 raw_cfg = profile.repo_dir / "builds" / "unix" / "configure.raw"
                 if unix_cfg.exists():
-                    configure_cmd = ["sh", "builds/unix/configure"]
+                    configure_cmd = ["bash", "builds/unix/configure"]
                 elif raw_cfg.exists():
-                    configure_cmd = ["sh", "builds/unix/configure.raw"]
+                    configure_cmd = ["bash", "builds/unix/configure.raw"]
                 else:
                     configure_cmd = []
             if configure_cmd:
@@ -443,9 +443,23 @@ def _build_once(
                 ok, err = True, ""
             if (not ok) and profile.name == "freetype":
                 # Freetype tags vary; force unix configure path directly.
-                fallback_cfg = ["sh", "-c", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure) && sh ./configure"]
+                fallback_cfg = ["bash", "-lc", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure) && bash ./configure"]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
+            if (not ok) and profile.name == "openvpn":
+                cfg_retries = [
+                    ["./configure", "--disable-plugin-auth-pam", "--disable-lzo", "--disable-lz4"],
+                    ["./configure", "--disable-plugin-auth-pam", "--disable-lzo"],
+                    ["./configure", "--disable-plugin-auth-pam", "--without-lzo"],
+                    ["./configure", "--disable-plugin-auth-pam"],
+                ]
+                for fallback_cfg in cfg_retries:
+                    print(f"[retry] openvpn configure fallback: {' '.join(fallback_cfg)}")
+                    ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
+                    if ok:
+                        err = ""
+                        break
+                    err = cfg_err or err
             if (not ok) and profile.name == "FFmpeg" and not (err or "").strip():
                 fallback_cfg = [
                     "bash",
@@ -468,6 +482,10 @@ def _build_once(
                     "--disable-x86asm",
                 ]
                 print(f"[retry] FFmpeg configure fallback: {' '.join(fallback_cfg)}")
+                ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
+            if (not ok) and profile.name == "FFmpeg":
+                fallback_cfg = ["bash", "./configure", "--disable-werror", "--disable-asm"]
+                print(f"[retry] FFmpeg minimal configure fallback: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
@@ -550,7 +568,7 @@ def _build_once(
                 or "unix-cc.mk" in err_text
                 or "Permission denied" in err_text
             ):
-                bootstrap_cmd = ["sh", "-c", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure) && sh ./configure"]
+                bootstrap_cmd = ["bash", "-lc", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure) && bash ./configure"]
                 print(f"[retry] freetype build failed; trying bootstrap: {' '.join(bootstrap_cmd)}")
                 setup_ok, setup_err = run_cmd(bootstrap_cmd, cwd=profile.repo_dir, env=env)
                 if setup_ok:
@@ -562,10 +580,12 @@ def _build_once(
         if (not ok) and profile.name == "openvpn":
             err_text = err or ""
             if "lzo enabled but missing" in err_text:
+                run_cmd(["make", "distclean"], cwd=profile.repo_dir, env=env)
                 lzo_retries = [
                     ["./configure", "--disable-plugin-auth-pam", "--disable-lzo", "--disable-lz4"],
                     ["./configure", "--disable-plugin-auth-pam", "--disable-lzo"],
                     ["./configure", "--disable-plugin-auth-pam", "--without-lzo"],
+                    ["./configure", "--disable-plugin-auth-pam"],
                 ]
                 for fallback_cfg in lzo_retries:
                     print(f"[retry] openvpn missing lzo; trying: {' '.join(fallback_cfg)}")
