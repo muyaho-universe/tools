@@ -118,7 +118,11 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
             ok, err = run_cmd(["sh", "./autogen.sh"], cwd=profile.repo_dir, env=env)
             if not ok:
                 return False, err
-        if not configure_path.exists() and ((profile.repo_dir / "configure.ac").exists() or (profile.repo_dir / "configure.in").exists()):
+        if (
+            profile.name != "freetype"
+            and not configure_path.exists()
+            and ((profile.repo_dir / "configure.ac").exists() or (profile.repo_dir / "configure.in").exists())
+        ):
             ok, err = run_cmd(["autoreconf", "-fi"], cwd=profile.repo_dir, env=env)
             if not ok:
                 return False, err
@@ -136,6 +140,9 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
                     ok, err = run_cmd(["autoreconf", "-fi"], cwd=profile.repo_dir, env=env)
                     if not ok:
                         return False, err
+            ok, err = _ensure_autotools_aux_files(profile.repo_dir / "builds", env)
+            if not ok:
+                return False, err
             ok, err = _ensure_autotools_aux_files(profile.repo_dir / "builds" / "unix", env)
             if not ok:
                 return False, err
@@ -265,12 +272,6 @@ def _ensure_autotools_aux_files(base_dir: Path, env: dict[str, str]) -> tuple[bo
         if copied:
             missing.remove(name)
 
-    # Last attempt: autoreconf only when configure.ac/configure.in exists.
-    if missing and ((base_dir / "configure.ac").exists() or (base_dir / "configure.in").exists()):
-        ok, _ = run_cmd(["autoreconf", "-fvi"], cwd=base_dir, env=env)
-        if ok:
-            missing = [n for n in names if not (base_dir / n).exists()]
-
     if missing:
         # Last-resort lightweight stubs to let configure proceed on legacy snapshots.
         try:
@@ -310,10 +311,18 @@ def _patch_openvpn_disable_lzo(repo_dir: Path) -> tuple[bool, str]:
         return False, str(exc)
 
     new = text
-    new = re.sub(r"\benable_lzo=yes\b", "enable_lzo=no", new)
-    new = re.sub(r"\benable_comp_lzo=yes\b", "enable_comp_lzo=no", new)
-    new = re.sub(r"\benable_lz4=yes\b", "enable_lz4=no", new)
+    # Cover common shell assignment styles in legacy OpenVPN configure scripts.
+    new = re.sub(r"\benable_lzo\s*=\s*\"?yes\"?", "enable_lzo=no", new)
+    new = re.sub(r"\benable_comp_lzo\s*=\s*\"?yes\"?", "enable_comp_lzo=no", new)
+    new = re.sub(r"\benable_lz4\s*=\s*\"?yes\"?", "enable_lz4=no", new)
+
+    # Neutralize hard failure branches related to missing LZO.
     new = new.replace("configure: error: lzo enabled but missing", "configure: warning: lzo check bypassed")
+    new = re.sub(
+        r"(as_fn_error .*lzo enabled but missing.*)",
+        r"echo \"configure: warning: lzo check bypassed\"",
+        new,
+    )
     if new != text:
         try:
             cfg.write_text(new, encoding="utf-8")
@@ -558,6 +567,10 @@ def _build_once(
                 unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
                 raw_cfg = profile.repo_dir / "builds" / "unix" / "configure.raw"
                 if unix_cfg.exists() and not _looks_like_autoconf_input(unix_cfg):
+                    ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir / "builds", env)
+                    if not ok:
+                        err = aux_err
+                        configure_cmd = []
                     ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir / "builds" / "unix", env)
                     if not ok:
                         err = aux_err
