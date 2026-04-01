@@ -267,6 +267,7 @@ def build_profiles() -> dict[str, BuildProfile]:
                 "--disable-shared",
                 "--enable-static",
                 "--disable-werror",
+                "--disable-doc",
                 "--disable-asm",
                 "--disable-inline-asm",
                 "--disable-x86asm",

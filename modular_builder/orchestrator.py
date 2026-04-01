@@ -272,7 +272,53 @@ def _ensure_autotools_aux_files(base_dir: Path, env: dict[str, str]) -> tuple[bo
             missing = [n for n in names if not (base_dir / n).exists()]
 
     if missing:
+        # Last-resort lightweight stubs to let configure proceed on legacy snapshots.
+        try:
+            if "install-sh" in missing:
+                (base_dir / "install-sh").write_text(
+                    "#!/bin/sh\ncp \"$1\" \"$2\" 2>/dev/null || install -m 644 \"$1\" \"$2\"\n",
+                    encoding="utf-8",
+                )
+                run_cmd(["chmod", "+x", "install-sh"], cwd=base_dir, env=env)
+            if "config.guess" in missing:
+                (base_dir / "config.guess").write_text(
+                    "#!/bin/sh\necho x86_64-pc-linux-gnu\n",
+                    encoding="utf-8",
+                )
+                run_cmd(["chmod", "+x", "config.guess"], cwd=base_dir, env=env)
+            if "config.sub" in missing:
+                (base_dir / "config.sub").write_text(
+                    "#!/bin/sh\necho \"$1\"\n",
+                    encoding="utf-8",
+                )
+                run_cmd(["chmod", "+x", "config.sub"], cwd=base_dir, env=env)
+        except OSError as exc:
+            return False, str(exc)
+        missing = [n for n in names if not (base_dir / n).exists()]
+    if missing:
         return False, f"missing autotools auxiliary files: {', '.join(missing)}"
+    return True, ""
+
+
+def _patch_openvpn_disable_lzo(repo_dir: Path) -> tuple[bool, str]:
+    cfg = repo_dir / "configure"
+    if not cfg.exists():
+        return True, ""
+    try:
+        text = cfg.read_text(encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        return False, str(exc)
+
+    new = text
+    new = re.sub(r"\benable_lzo=yes\b", "enable_lzo=no", new)
+    new = re.sub(r"\benable_comp_lzo=yes\b", "enable_comp_lzo=no", new)
+    new = re.sub(r"\benable_lz4=yes\b", "enable_lz4=no", new)
+    new = new.replace("configure: error: lzo enabled but missing", "configure: warning: lzo check bypassed")
+    if new != text:
+        try:
+            cfg.write_text(new, encoding="utf-8")
+        except OSError as exc:
+            return False, str(exc)
     return True, ""
 
 
@@ -565,6 +611,16 @@ def _build_once(
                         err = ""
                         break
                     err = cfg_err or err
+                if (not ok) and "lzo enabled but missing" in (err or ""):
+                    ok, patch_err = _patch_openvpn_disable_lzo(profile.repo_dir)
+                    if ok:
+                        fallback_cfg = ["./configure", "--disable-plugin-auth-pam"]
+                        print(f"[retry] openvpn configure script patched for lzo; retry: {' '.join(fallback_cfg)}")
+                        ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=cfg_env)
+                        if not ok:
+                            err = cfg_err or err
+                    else:
+                        err = patch_err or err
             if (not ok) and profile.name == "FFmpeg" and not (err or "").strip():
                 fallback_cfg = [
                     "bash",
@@ -572,6 +628,7 @@ def _build_once(
                     "--disable-shared",
                     "--enable-static",
                     "--disable-werror",
+                    "--disable-doc",
                     "--disable-asm",
                     "--disable-inline-asm",
                     "--disable-x86asm",
@@ -585,6 +642,7 @@ def _build_once(
                     "--disable-shared",
                     "--enable-static",
                     "--disable-werror",
+                    "--disable-doc",
                     "--disable-asm",
                     "--disable-inline-asm",
                     "--disable-x86asm",
@@ -592,11 +650,11 @@ def _build_once(
                 print(f"[retry] FFmpeg configure fallback: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
             if (not ok) and profile.name == "FFmpeg":
-                fallback_cfg = ["bash", "./configure", "--disable-werror", "--disable-asm", "--disable-inline-asm", "--disable-x86asm"]
+                fallback_cfg = ["bash", "./configure", "--disable-werror", "--disable-doc", "--disable-asm", "--disable-inline-asm", "--disable-x86asm"]
                 print(f"[retry] FFmpeg minimal configure fallback: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
             if (not ok) and profile.name == "FFmpeg":
-                fallback_cfg = ["bash", "./configure", "--disable-asm", "--disable-inline-asm", "--disable-x86asm"]
+                fallback_cfg = ["bash", "./configure", "--disable-doc", "--disable-asm", "--disable-inline-asm", "--disable-x86asm"]
                 print(f"[retry] FFmpeg plain configure fallback: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
             if not ok:
@@ -644,6 +702,12 @@ def _build_once(
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name == "FFmpeg":
             err_text = err or ""
+            if "makeinfo" in err_text or "doc/ffmpeg.html" in err_text:
+                retry_cmd = ["make", "-j1", "V=1", "ffmpeg", "ffprobe", "ffplay"]
+                print(f"[retry] FFmpeg doc toolchain issue; build binaries only: {' '.join(retry_cmd)}")
+                ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "FFmpeg":
+            err_text = err or ""
             if "mathops.h:125" in err_text or "operand type mismatch for `shr'" in err_text:
                 run_cmd(["make", "distclean"], cwd=profile.repo_dir, env=env)
                 safe_cfg = [
@@ -652,6 +716,7 @@ def _build_once(
                     "--disable-shared",
                     "--enable-static",
                     "--disable-werror",
+                    "--disable-doc",
                     "--disable-asm",
                     "--disable-inline-asm",
                     "--disable-x86asm",
@@ -723,6 +788,7 @@ def _build_once(
             err_text = err or ""
             if "lzo enabled but missing" in err_text:
                 run_cmd(["make", "distclean"], cwd=profile.repo_dir, env=env)
+                _patch_openvpn_disable_lzo(profile.repo_dir)
                 lzo_retries = [
                     ["./configure", "--disable-plugin-auth-pam", "--disable-comp-lzo", "--disable-lz4"],
                     ["./configure", "--disable-plugin-auth-pam", "--disable-comp-lzo"],
