@@ -216,19 +216,39 @@ def _ensure_autotools_aux_files(base_dir: Path, env: dict[str, str]) -> tuple[bo
     if not missing:
         return True, ""
 
-    # Try autotools installer first.
-    ok, err = run_cmd(["autoreconf", "-fvi"], cwd=base_dir, env=env)
-    if ok:
-        missing = [n for n in names if not (base_dir / n).exists()]
-        if not missing:
-            return True, ""
+    # First try copying from within the repository tree.
+    repo_root = base_dir
+    for _ in range(4):
+        if (repo_root / ".git").exists():
+            break
+        if repo_root.parent == repo_root:
+            break
+        repo_root = repo_root.parent
+    for name in list(missing):
+        copied = False
+        try:
+            for src in repo_root.rglob(name):
+                if src.is_file() and src.parent != base_dir:
+                    shutil.copy2(src, base_dir / name)
+                    if name == "install-sh":
+                        run_cmd(["chmod", "+x", str(base_dir / name)], cwd=base_dir, env=env)
+                    copied = True
+                    break
+        except OSError:
+            copied = False
+        if copied:
+            missing.remove(name)
 
     # Fallback: copy system copies when available.
     candidates = [
         Path("/usr/share/automake-1.16"),
         Path("/usr/share/automake-1.15"),
+        Path("/usr/share/automake-1.14"),
         Path("/usr/share/misc"),
     ]
+    for auto_dir in Path("/usr/share").glob("automake-*"):
+        if auto_dir.is_dir():
+            candidates.append(auto_dir)
     for name in list(missing):
         copied = False
         for root in candidates:
@@ -244,6 +264,12 @@ def _ensure_autotools_aux_files(base_dir: Path, env: dict[str, str]) -> tuple[bo
                     continue
         if copied:
             missing.remove(name)
+
+    # Last attempt: autoreconf only when configure.ac/configure.in exists.
+    if missing and ((base_dir / "configure.ac").exists() or (base_dir / "configure.in").exists()):
+        ok, _ = run_cmd(["autoreconf", "-fvi"], cwd=base_dir, env=env)
+        if ok:
+            missing = [n for n in names if not (base_dir / n).exists()]
 
     if missing:
         return False, f"missing autotools auxiliary files: {', '.join(missing)}"
@@ -531,6 +557,9 @@ def _build_once(
                     cfg_env = dict(env)
                     cfg_env["ac_cv_header_lzo_lzo1x_h"] = "no"
                     cfg_env["ac_cv_lib_lzo2_lzo1x_1_15_compress"] = "no"
+                    cfg_env["enable_lzo"] = "no"
+                    cfg_env["enable_comp_lzo"] = "no"
+                    cfg_env["enable_lz4"] = "no"
                     ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=cfg_env)
                     if ok:
                         err = ""
@@ -544,6 +573,8 @@ def _build_once(
                     "--enable-static",
                     "--disable-werror",
                     "--disable-asm",
+                    "--disable-inline-asm",
+                    "--disable-x86asm",
                 ]
                 print(f"[retry] FFmpeg configure returned empty stderr; trying: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
@@ -555,16 +586,17 @@ def _build_once(
                     "--enable-static",
                     "--disable-werror",
                     "--disable-asm",
+                    "--disable-inline-asm",
                     "--disable-x86asm",
                 ]
                 print(f"[retry] FFmpeg configure fallback: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
             if (not ok) and profile.name == "FFmpeg":
-                fallback_cfg = ["bash", "./configure", "--disable-werror", "--disable-asm"]
+                fallback_cfg = ["bash", "./configure", "--disable-werror", "--disable-asm", "--disable-inline-asm", "--disable-x86asm"]
                 print(f"[retry] FFmpeg minimal configure fallback: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
             if (not ok) and profile.name == "FFmpeg":
-                fallback_cfg = ["bash", "./configure"]
+                fallback_cfg = ["bash", "./configure", "--disable-asm", "--disable-inline-asm", "--disable-x86asm"]
                 print(f"[retry] FFmpeg plain configure fallback: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
             if not ok:
@@ -610,6 +642,27 @@ def _build_once(
             retry_cmd = ["make", "-j1", "V=1"]
             print(f"[retry] FFmpeg build failed; retry verbose single-thread: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "FFmpeg":
+            err_text = err or ""
+            if "mathops.h:125" in err_text or "operand type mismatch for `shr'" in err_text:
+                run_cmd(["make", "distclean"], cwd=profile.repo_dir, env=env)
+                safe_cfg = [
+                    "bash",
+                    "./configure",
+                    "--disable-shared",
+                    "--enable-static",
+                    "--disable-werror",
+                    "--disable-asm",
+                    "--disable-inline-asm",
+                    "--disable-x86asm",
+                ]
+                print(f"[retry] FFmpeg asm mismatch; reconfigure safe mode: {' '.join(safe_cfg)}")
+                ok, cfg_err = run_cmd(safe_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
+                if ok:
+                    retry_cmd = ["make", "-j1", "V=1"]
+                    ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                else:
+                    err = cfg_err or err
         if (not ok) and profile.name in {"lou_trace", "lou_checktable", "lou_translate"}:
             target_path = f"tools/{profile.name}"
             retry_plan = [
@@ -685,6 +738,9 @@ def _build_once(
                     lzo_env = dict(env)
                     lzo_env["ac_cv_header_lzo_lzo1x_h"] = "no"
                     lzo_env["ac_cv_lib_lzo2_lzo1x_1_15_compress"] = "no"
+                    lzo_env["enable_lzo"] = "no"
+                    lzo_env["enable_comp_lzo"] = "no"
+                    lzo_env["enable_lz4"] = "no"
                     ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=lzo_env)
                     if not ok:
                         err = cfg_err or err
