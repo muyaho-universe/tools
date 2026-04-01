@@ -124,8 +124,68 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
                 ok, err = run_cmd(["bash", "-c", "cd builds/unix && ./configure.raw"], cwd=profile.repo_dir, env=env)
                 if not ok:
                     return False, err
+                unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
+                if not unix_cfg.exists():
+                    # Some tags keep only configure.raw; create configure expected by detect.mk.
+                    ok, err = run_cmd(
+                        ["sh", "-c", "cd builds/unix && cp configure.raw configure && chmod +x configure"],
+                        cwd=profile.repo_dir,
+                        env=env,
+                    )
+                    if not ok:
+                        return False, err
 
     return True, ""
+
+
+def _detect_openssl_legacy_prefix() -> Path | None:
+    candidates = [
+        os.getenv("OPENSSL_LEGACY_PREFIX", ""),
+        "/home/user/BinForge/local/openssl-1.1",
+        "/usr/local/openssl-1.1",
+        "/opt/openssl-1.1",
+    ]
+    for raw in candidates:
+        if not raw:
+            continue
+        prefix = Path(raw)
+        if not prefix.exists():
+            continue
+        header = prefix / "include" / "openssl" / "opensslv.h"
+        if not header.exists():
+            continue
+        try:
+            txt = header.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if "OpenSSL 1.1." in txt or "OpenSSL 1.0." in txt:
+            return prefix
+    return None
+
+
+def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
+    compat_env = dict(base_env)
+    legacy_prefix = _detect_openssl_legacy_prefix()
+    if legacy_prefix:
+        include_dir = legacy_prefix / "include"
+        lib_dir = legacy_prefix / "lib"
+        lib64_dir = legacy_prefix / "lib64"
+        cpp = compat_env.get("CPPFLAGS", "").strip()
+        ld = compat_env.get("LDFLAGS", "").strip()
+        pkg = compat_env.get("PKG_CONFIG_PATH", "").strip()
+        ld_lib = compat_env.get("LD_LIBRARY_PATH", "").strip()
+        compat_env["CPPFLAGS"] = f"-I{include_dir} {cpp}".strip()
+        compat_env["LDFLAGS"] = f"-L{lib_dir} -L{lib64_dir} {ld}".strip()
+        compat_env["PKG_CONFIG_PATH"] = f"{lib_dir}/pkgconfig:{lib64_dir}/pkgconfig:{pkg}".strip(":")
+        compat_env["LD_LIBRARY_PATH"] = f"{lib_dir}:{lib64_dir}:{ld_lib}".strip(":")
+        print(f"[openvpn-fix] using legacy OpenSSL prefix: {legacy_prefix}")
+    compat_env["CFLAGS"] = (
+        compat_env.get("CFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10100000L"
+    ).strip()
+    compat_env["CXXFLAGS"] = (
+        compat_env.get("CXXFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10100000L"
+    ).strip()
+    return compat_env
 
 
 def _patch_openssl_fileglob_issue(repo_dir: Path) -> tuple[bool, str]:
@@ -366,16 +426,30 @@ def _build_once(
                 quiet_stdout=(profile.name != "FFmpeg"),
             )
             if (not ok) and profile.name == "freetype":
-                # Older freetype tags can bootstrap via make setup even without ./configure.
-                fallback_cfg = ["make", "setup"]
+                # Older freetype tags expect setup in builds/unix, not at repo root.
+                fallback_cfg = ["make", "-C", "builds/unix", "setup"]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
             if (not ok) and profile.name == "FFmpeg" and not (err or "").strip():
-                fallback_cfg = ["bash", "./configure", "--disable-shared", "--enable-static", "--disable-werror"]
+                fallback_cfg = [
+                    "bash",
+                    "./configure",
+                    "--disable-shared",
+                    "--enable-static",
+                    "--disable-werror",
+                    "--disable-x86asm",
+                ]
                 print(f"[retry] FFmpeg configure returned empty stderr; trying: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
             if (not ok) and profile.name == "FFmpeg":
-                fallback_cfg = ["sh", "./configure", "--disable-shared", "--enable-static", "--disable-werror"]
+                fallback_cfg = [
+                    "sh",
+                    "./configure",
+                    "--disable-shared",
+                    "--enable-static",
+                    "--disable-werror",
+                    "--disable-x86asm",
+                ]
                 print(f"[retry] FFmpeg configure fallback: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
             if not ok:
@@ -451,11 +525,32 @@ def _build_once(
                         retry_cmd = [cxx, str(src_rel), "-o", "pcf2bdf"]
                         print(f"[retry] pcf2bdf retry with CXX: {' '.join(retry_cmd)}")
                         ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "freetype":
+            err_text = err or ""
+            if "detect.mk" in err_text or "./configure: not found" in err_text:
+                bootstrap_cmd = ["make", "-C", "builds/unix", "setup"]
+                print(f"[retry] freetype build failed; trying bootstrap: {' '.join(bootstrap_cmd)}")
+                setup_ok, setup_err = run_cmd(bootstrap_cmd, cwd=profile.repo_dir, env=env)
+                if setup_ok:
+                    retry_build = [build_cmd[0], *[x for x in build_cmd[1:] if x != "setup"]]
+                    print(f"[retry] freetype bootstrap done; retry build: {' '.join(retry_build)}")
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                else:
+                    err = setup_err or err
         if (not ok) and profile.name == "openvpn":
             err_text = err or ""
-            if "pulled_options_state" in err_text or "HMAC_Init_ex" in err_text or "deprecated-declarations" in err_text:
+            if (
+                "pulled_options_state" in err_text
+                or "HMAC_Init_ex" in err_text
+                or "deprecated-declarations" in err_text
+                or "EVP_PKEY_get_id" in err_text
+                or "openssl_compat.h" in err_text
+                or "incomplete type 'EVP_PKEY'" in err_text
+                or "incomplete type 'X509'" in err_text
+                or "incomplete type 'EVP_MD'" in err_text
+            ):
                 # First try mbedtls only when it's available.
-                has_mbedtls = (profile.repo_dir / "/usr/include/mbedtls").exists()
+                has_mbedtls = Path("/usr/include/mbedtls").exists()
                 if shutil.which("pkg-config"):
                     pc_ok, _ = run_cmd(["pkg-config", "--exists", "mbedtls"], cwd=profile.repo_dir, env=env)
                     has_mbedtls = has_mbedtls or pc_ok
@@ -469,10 +564,8 @@ def _build_once(
                     else:
                         err = cfg_err or err
                 if not ok:
-                    # Fallback to openssl build with relaxed deprecation handling.
-                    compat_env = dict(env)
-                    compat_env["CFLAGS"] = (compat_env.get("CFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10100000L").strip()
-                    compat_env["CXXFLAGS"] = (compat_env.get("CXXFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10100000L").strip()
+                    # Fallback to openssl build with relaxed flags and legacy prefix probing.
+                    compat_env = _openvpn_compat_openssl_env(env)
                     compat_cfg = ["./configure", "--disable-plugin-auth-pam", "--with-crypto-library=openssl"]
                     print(f"[retry] openvpn mbedtls unavailable/failed; trying openssl-compat flags")
                     ok, cfg_err = run_cmd(compat_cfg, cwd=profile.repo_dir, env=compat_env)
