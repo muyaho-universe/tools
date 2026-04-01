@@ -121,14 +121,16 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
             # Old freetype tags do not have top-level ./configure; they use builds/unix/configure(.raw).
             unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
             raw = profile.repo_dir / "builds" / "unix" / "configure.raw"
-            if (not unix_cfg.exists()) and raw.exists():
+            if ((not unix_cfg.exists()) or _looks_like_autoconf_input(unix_cfg)) and raw.exists():
                 ok, err = run_cmd(
-                    ["sh", "-c", "cd builds/unix && cp configure.raw configure && chmod +x configure"],
+                    ["bash", "-lc", "cd builds/unix && autoconf -o configure configure.raw && chmod +x configure"],
                     cwd=profile.repo_dir,
                     env=env,
                 )
                 if not ok:
-                    return False, err
+                    ok, err = run_cmd(["autoreconf", "-fi"], cwd=profile.repo_dir, env=env)
+                    if not ok:
+                        return False, err
 
     return True, ""
 
@@ -189,6 +191,15 @@ def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
         compat_env.get("CXXFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10100000L"
     ).strip()
     return compat_env
+
+
+def _looks_like_autoconf_input(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    head = "\n".join(text.splitlines()[:40])
+    return "AC_INIT(" in head or "AC_PREREQ(" in head
 
 
 def _patch_openssl_fileglob_issue(repo_dir: Path) -> tuple[bool, str]:
@@ -426,10 +437,10 @@ def _build_once(
                 # Old freetype tags build via builds/unix/configure(.raw).
                 unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
                 raw_cfg = profile.repo_dir / "builds" / "unix" / "configure.raw"
-                if unix_cfg.exists():
+                if unix_cfg.exists() and not _looks_like_autoconf_input(unix_cfg):
                     configure_cmd = ["bash", "builds/unix/configure"]
                 elif raw_cfg.exists():
-                    configure_cmd = ["bash", "builds/unix/configure.raw"]
+                    configure_cmd = ["bash", "-lc", "cd builds/unix && autoconf -o configure configure.raw && chmod +x configure && bash ./configure"]
                 else:
                     configure_cmd = []
             if configure_cmd:
@@ -443,19 +454,24 @@ def _build_once(
                 ok, err = True, ""
             if (not ok) and profile.name == "freetype":
                 # Freetype tags vary; force unix configure path directly.
-                fallback_cfg = ["bash", "-lc", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure) && bash ./configure"]
+                fallback_cfg = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && bash ./configure"]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
             if (not ok) and profile.name == "openvpn":
                 cfg_retries = [
                     ["./configure", "--disable-plugin-auth-pam", "--disable-lzo", "--disable-lz4"],
                     ["./configure", "--disable-plugin-auth-pam", "--disable-lzo"],
+                    ["./configure", "--disable-plugin-auth-pam", "--enable-lzo=no", "--enable-lz4=no"],
+                    ["./configure", "--disable-plugin-auth-pam", "--enable-lzo=no"],
                     ["./configure", "--disable-plugin-auth-pam", "--without-lzo"],
                     ["./configure", "--disable-plugin-auth-pam"],
                 ]
                 for fallback_cfg in cfg_retries:
                     print(f"[retry] openvpn configure fallback: {' '.join(fallback_cfg)}")
-                    ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
+                    cfg_env = dict(env)
+                    cfg_env["ac_cv_header_lzo_lzo1x_h"] = "no"
+                    cfg_env["ac_cv_lib_lzo2_lzo1x_1_15_compress"] = "no"
+                    ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=cfg_env)
                     if ok:
                         err = ""
                         break
@@ -486,6 +502,10 @@ def _build_once(
             if (not ok) and profile.name == "FFmpeg":
                 fallback_cfg = ["bash", "./configure", "--disable-werror", "--disable-asm"]
                 print(f"[retry] FFmpeg minimal configure fallback: {' '.join(fallback_cfg)}")
+                ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
+            if (not ok) and profile.name == "FFmpeg":
+                fallback_cfg = ["bash", "./configure"]
+                print(f"[retry] FFmpeg plain configure fallback: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
@@ -567,8 +587,9 @@ def _build_once(
                 or "./configure: not found" in err_text
                 or "unix-cc.mk" in err_text
                 or "Permission denied" in err_text
+                or "AC_INIT(" in err_text
             ):
-                bootstrap_cmd = ["bash", "-lc", "cd builds/unix && test -x configure || (cp configure.raw configure && chmod +x configure) && bash ./configure"]
+                bootstrap_cmd = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && bash ./configure"]
                 print(f"[retry] freetype build failed; trying bootstrap: {' '.join(bootstrap_cmd)}")
                 setup_ok, setup_err = run_cmd(bootstrap_cmd, cwd=profile.repo_dir, env=env)
                 if setup_ok:
@@ -584,17 +605,22 @@ def _build_once(
                 lzo_retries = [
                     ["./configure", "--disable-plugin-auth-pam", "--disable-lzo", "--disable-lz4"],
                     ["./configure", "--disable-plugin-auth-pam", "--disable-lzo"],
+                    ["./configure", "--disable-plugin-auth-pam", "--enable-lzo=no", "--enable-lz4=no"],
+                    ["./configure", "--disable-plugin-auth-pam", "--enable-lzo=no"],
                     ["./configure", "--disable-plugin-auth-pam", "--without-lzo"],
                     ["./configure", "--disable-plugin-auth-pam"],
                 ]
                 for fallback_cfg in lzo_retries:
                     print(f"[retry] openvpn missing lzo; trying: {' '.join(fallback_cfg)}")
-                    ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
+                    lzo_env = dict(env)
+                    lzo_env["ac_cv_header_lzo_lzo1x_h"] = "no"
+                    lzo_env["ac_cv_lib_lzo2_lzo1x_1_15_compress"] = "no"
+                    ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=lzo_env)
                     if not ok:
                         err = cfg_err or err
                         continue
                     retry_build = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
-                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=lzo_env)
                     if ok:
                         break
             if (
