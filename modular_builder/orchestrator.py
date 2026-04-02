@@ -96,6 +96,11 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
         first = cmd[0]
         first_path = profile.repo_dir / first
 
+        if profile.name == "freetype" and first.endswith("autogen.sh"):
+            # Legacy freetype snapshots often lack configure.ac and fail in autogen.
+            # We bootstrap from builds/unix/configure.raw instead.
+            continue
+
         if first.endswith("autogen.sh") and configure_path.exists():
             continue
 
@@ -326,8 +331,22 @@ def _patch_openvpn_disable_lzo(repo_dir: Path) -> tuple[bool, str]:
     new = new.replace("configure: error: lzo enabled but missing", "configure: warning: lzo check bypassed")
     new = re.sub(
         r"(as_fn_error .*lzo enabled but missing.*)",
-        r"echo \"configure: warning: lzo check bypassed\"",
+        r": # lzo failure bypassed by modular_builder",
         new,
+    )
+    new = re.sub(
+        r"as_fn_error[^\n]*lzo check bypassed[^\n]*",
+        r": # lzo failure bypassed by modular_builder",
+        new,
+    )
+    # Disable explicit conditional guards that hard-fail when LZO is missing.
+    new = new.replace(
+        "if test x$have_lzo = xno && test x$enable_lzo = xyes; then",
+        "if false; then # patched: disable strict lzo requirement",
+    )
+    new = new.replace(
+        "if test x$have_lzo = xno && test x$enable_comp_lzo = xyes; then",
+        "if false; then # patched: disable strict comp-lzo requirement",
     )
     if new != text:
         try:
@@ -573,6 +592,10 @@ def _build_once(
                 unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
                 raw_cfg = profile.repo_dir / "builds" / "unix" / "configure.raw"
                 if unix_cfg.exists() and not _looks_like_autoconf_input(unix_cfg):
+                    ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir, env)
+                    if not ok:
+                        err = aux_err
+                        configure_cmd = []
                     ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir / "builds", env)
                     if not ok:
                         err = aux_err
@@ -584,7 +607,12 @@ def _build_once(
                     else:
                         configure_cmd = ["bash", "-lc", "cd builds/unix && ./configure"]
                 elif raw_cfg.exists():
-                    configure_cmd = ["bash", "-lc", "cd builds/unix && autoconf -o configure configure.raw && chmod +x configure && bash ./configure"]
+                    configure_cmd = [
+                        "bash",
+                        "-lc",
+                        "cd builds/unix && autoconf -o configure configure.raw && chmod +x configure && "
+                        "test -x ../install-sh || true && bash ./configure",
+                    ]
                 else:
                     configure_cmd = []
             if configure_cmd:
