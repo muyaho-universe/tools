@@ -124,6 +124,9 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
         ok, err = _patch_freetype_optional_features(profile.repo_dir)
         if not ok:
             return False, err
+        ok, err = _ensure_freetype_bzlib_stub(profile.repo_dir)
+        if not ok:
+            return False, err
 
     # Some historical tags do not ship ./configure, but can still generate it.
     configure_missing = bool(profile.configure_cmd) and profile.configure_cmd[0] == "./configure" and not configure_path.exists()
@@ -489,6 +492,54 @@ def _patch_freetype_optional_features(repo_dir: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _ensure_freetype_bzlib_stub(repo_dir: Path) -> tuple[bool, str]:
+    """
+    Legacy freetype snapshots sometimes still compile ftbzip2.c even when bzip2 is not
+    available on the host. Provide a tiny header-only bzlib compatibility stub so compile
+    can proceed without libbz2 development headers.
+    """
+    header = repo_dir / "bzlib.h"
+    if header.exists():
+        return True, ""
+    text = (
+        "#ifndef BZLIB_H\n"
+        "#define BZLIB_H\n"
+        "#define BZ_RUN 0\n"
+        "#define BZ_FLUSH 1\n"
+        "#define BZ_FINISH 2\n"
+        "#define BZ_OK 0\n"
+        "#define BZ_RUN_OK 1\n"
+        "#define BZ_FLUSH_OK 2\n"
+        "#define BZ_FINISH_OK 3\n"
+        "#define BZ_STREAM_END 4\n"
+        "#define BZ_PARAM_ERROR (-2)\n"
+        "typedef struct bz_stream_s {\n"
+        "  char* next_in;\n"
+        "  unsigned int avail_in;\n"
+        "  unsigned int total_in_lo32;\n"
+        "  unsigned int total_in_hi32;\n"
+        "  char* next_out;\n"
+        "  unsigned int avail_out;\n"
+        "  unsigned int total_out_lo32;\n"
+        "  unsigned int total_out_hi32;\n"
+        "  void* state;\n"
+        "  void* (*bzalloc)(void*,int,int);\n"
+        "  void (*bzfree)(void*,void*);\n"
+        "  void* opaque;\n"
+        "} bz_stream;\n"
+        "static inline int BZ2_bzDecompressInit(bz_stream* s, int v, int small){(void)s;(void)v;(void)small;return BZ_PARAM_ERROR;}\n"
+        "static inline int BZ2_bzDecompress(bz_stream* s){(void)s;return BZ_STREAM_END;}\n"
+        "static inline int BZ2_bzDecompressEnd(bz_stream* s){(void)s;return BZ_OK;}\n"
+        "#endif\n"
+    )
+    try:
+        header.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        return False, str(exc)
+    print("[freetype-fix] created bzlib.h compatibility stub")
+    return True, ""
+
+
 def _ensure_openvpn_dummy_binary(repo_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
     out_dir = repo_dir / "src" / "openvpn"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -715,6 +766,9 @@ def _build_once(
     env = os.environ.copy()
     env.update(profile.env_overrides)
     env.update(variant.env_overrides)
+    if profile.name == "freetype":
+        cpp = env.get("CPPFLAGS", "").strip()
+        env["CPPFLAGS"] = f"-I{profile.repo_dir} {cpp}".strip()
     openssl_safe_mode = profile.name == "openssl"
     freetype_cmake_built = False
 
