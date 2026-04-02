@@ -430,6 +430,12 @@ def _patch_freetype_optional_features(repo_dir: Path) -> tuple[bool, str]:
         repo_dir / "include" / "freetype" / "config" / "ftoption.h",
         repo_dir / "devel" / "ftoption.h",
     ]
+    for p in repo_dir.glob("**/ftoption.h"):
+        if p not in candidates:
+            candidates.append(p)
+    for p in repo_dir.glob("**/ftoption.h.in"):
+        if p not in candidates:
+            candidates.append(p)
     changed_any = False
     for path in candidates:
         if not path.exists():
@@ -446,6 +452,35 @@ def _patch_freetype_optional_features(repo_dir: Path) -> tuple[bool, str]:
         if new != text:
             try:
                 path.write_text(new, encoding="utf-8")
+                changed_any = True
+            except OSError as exc:
+                return False, str(exc)
+
+    # Some legacy freetype trees still include bzip2 module unconditionally via modules.cfg.
+    # Remove bzip2-related module lines so ftbzip2.c is not compiled.
+    module_files: list[Path] = []
+    for p in repo_dir.glob("**/modules.cfg"):
+        module_files.append(p)
+    for p in repo_dir.glob("**/modules.cfg.in"):
+        module_files.append(p)
+    for path in module_files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return False, str(exc)
+        lines = text.splitlines()
+        new_lines: list[str] = []
+        mod_changed = False
+        for ln in lines:
+            low = ln.lower()
+            if ("bzip2" in low) or ("ftbzip2.c" in low):
+                new_lines.append(f"# {ln}")
+                mod_changed = True
+            else:
+                new_lines.append(ln)
+        if mod_changed:
+            try:
+                path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
                 changed_any = True
             except OSError as exc:
                 return False, str(exc)
