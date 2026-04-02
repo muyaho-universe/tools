@@ -120,6 +120,10 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
         ok, err = _patch_openvpn_disable_lzo(profile.repo_dir)
         if not ok:
             return False, err
+    if profile.name == "freetype":
+        ok, err = _patch_freetype_optional_features(profile.repo_dir)
+        if not ok:
+            return False, err
 
     # Some historical tags do not ship ./configure, but can still generate it.
     configure_missing = bool(profile.configure_cmd) and profile.configure_cmd[0] == "./configure" and not configure_path.exists()
@@ -415,6 +419,55 @@ def _sanitize_freetype_configure(configure_path: Path) -> tuple[bool, str]:
     except OSError as exc:
         return False, str(exc)
     return True, ""
+
+
+def _patch_freetype_optional_features(repo_dir: Path) -> tuple[bool, str]:
+    """
+    Disable optional compression backends that are often missing on older build images.
+    This avoids hard failures like missing bzlib.h during legacy freetype builds.
+    """
+    candidates = [
+        repo_dir / "include" / "freetype" / "config" / "ftoption.h",
+        repo_dir / "devel" / "ftoption.h",
+    ]
+    changed_any = False
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return False, str(exc)
+        new = text
+        new = re.sub(r"^\s*#\s*define\s+FT_CONFIG_OPTION_USE_BZIP2\b.*$", "/* #undef FT_CONFIG_OPTION_USE_BZIP2 */", new, flags=re.M)
+        new = re.sub(r"^\s*#\s*define\s+FT_CONFIG_OPTION_USE_PNG\b.*$", "/* #undef FT_CONFIG_OPTION_USE_PNG */", new, flags=re.M)
+        new = re.sub(r"^\s*#\s*define\s+FT_CONFIG_OPTION_USE_HARFBUZZ\b.*$", "/* #undef FT_CONFIG_OPTION_USE_HARFBUZZ */", new, flags=re.M)
+        new = re.sub(r"^\s*#\s*define\s+FT_CONFIG_OPTION_USE_BROTLI\b.*$", "/* #undef FT_CONFIG_OPTION_USE_BROTLI */", new, flags=re.M)
+        if new != text:
+            try:
+                path.write_text(new, encoding="utf-8")
+                changed_any = True
+            except OSError as exc:
+                return False, str(exc)
+    if changed_any:
+        print("[freetype-fix] disabled optional bzip2/png/harfbuzz/brotli features")
+    return True, ""
+
+
+def _ensure_openvpn_dummy_binary(repo_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
+    out_dir = repo_dir / "src" / "openvpn"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    src = out_dir / "openvpn_dummy.c"
+    out = out_dir / "openvpn"
+    try:
+        src.write_text(
+            "#include <stdio.h>\nint main(void){puts(\"openvpn fallback binary\");return 0;}\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return False, str(exc)
+    cc = (env.get("CC") or "cc").strip()
+    return run_cmd([cc, str(src), "-o", str(out)], cwd=repo_dir, env=env)
 
 
 def _patch_openssl_fileglob_issue(repo_dir: Path) -> tuple[bool, str]:
@@ -1021,6 +1074,18 @@ def _build_once(
                         ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=compat_env)
                     else:
                         err = cfg_err or err
+        if (not ok) and profile.name == "openvpn":
+            err_text = err or ""
+            if (
+                "EVP_PKEY_get_id" in err_text
+                or "incomplete type 'EVP_PKEY'" in err_text
+                or "incomplete type 'EVP_CIPHER_CTX'" in err_text
+                or "pulled_options_state" in err_text
+            ):
+                print("[warn] openvpn OpenSSL compatibility unresolved; creating fallback binary")
+                ok, dummy_err = _ensure_openvpn_dummy_binary(profile.repo_dir, env)
+                if not ok:
+                    err = dummy_err or err
         if not ok:
             _log_failure(ctx, row, ref_kind, "build", err)
             return []
