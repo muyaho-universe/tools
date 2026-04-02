@@ -124,6 +124,9 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
         ok, err = _patch_freetype_optional_features(profile.repo_dir)
         if not ok:
             return False, err
+        ok, err = _patch_freetype_bzip2_sources(profile.repo_dir)
+        if not ok:
+            return False, err
         ok, err = _ensure_freetype_bzlib_stub(profile.repo_dir)
         if not ok:
             return False, err
@@ -492,15 +495,48 @@ def _patch_freetype_optional_features(repo_dir: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _patch_freetype_bzip2_sources(repo_dir: Path) -> tuple[bool, str]:
+    """
+    As a hard fallback, neutralize direct bzlib include lines in ftbzip2 sources.
+    Some old freetype snapshots still compile this file even after option toggles.
+    """
+    changed_any = False
+    targets: list[Path] = []
+    for p in repo_dir.glob("**/ftbzip2.c"):
+        targets.append(p)
+    if not targets:
+        return True, ""
+    for path in targets:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return False, str(exc)
+        new = re.sub(
+            r'^\s*#\s*include\s*[<"]bzlib\.h[>"].*$',
+            "/* patched: bzlib disabled for legacy build */",
+            text,
+            flags=re.M,
+        )
+        # Force-disable even if config headers define it.
+        if "FT_CONFIG_OPTION_USE_BZIP2" in new and "#undef FT_CONFIG_OPTION_USE_BZIP2" not in new:
+            new = "#undef FT_CONFIG_OPTION_USE_BZIP2\n" + new
+        if new != text:
+            try:
+                path.write_text(new, encoding="utf-8")
+                changed_any = True
+            except OSError as exc:
+                return False, str(exc)
+    if changed_any:
+        print("[freetype-fix] patched ftbzip2 sources to bypass bzlib.h")
+    return True, ""
+
+
 def _ensure_freetype_bzlib_stub(repo_dir: Path) -> tuple[bool, str]:
     """
     Legacy freetype snapshots sometimes still compile ftbzip2.c even when bzip2 is not
     available on the host. Provide a tiny header-only bzlib compatibility stub so compile
     can proceed without libbz2 development headers.
     """
-    header = repo_dir / "bzlib.h"
-    if header.exists():
-        return True, ""
     text = (
         "#ifndef BZLIB_H\n"
         "#define BZLIB_H\n"
@@ -532,11 +568,22 @@ def _ensure_freetype_bzlib_stub(repo_dir: Path) -> tuple[bool, str]:
         "static inline int BZ2_bzDecompressEnd(bz_stream* s){(void)s;return BZ_OK;}\n"
         "#endif\n"
     )
-    try:
-        header.write_text(text, encoding="utf-8")
-    except OSError as exc:
-        return False, str(exc)
-    print("[freetype-fix] created bzlib.h compatibility stub")
+    written_any = False
+    for header in [
+        repo_dir / "bzlib.h",
+        repo_dir / "include" / "bzlib.h",
+        repo_dir / "src" / "bzip2" / "bzlib.h",
+    ]:
+        if header.exists():
+            continue
+        try:
+            header.parent.mkdir(parents=True, exist_ok=True)
+            header.write_text(text, encoding="utf-8")
+            written_any = True
+        except OSError as exc:
+            return False, str(exc)
+    if written_any:
+        print("[freetype-fix] created bzlib.h compatibility stubs")
     return True, ""
 
 
@@ -1078,6 +1125,19 @@ def _build_once(
                         print(f"[retry] pcf2bdf retry with CXX: {' '.join(retry_cmd)}")
                         ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name == "freetype":
+            err_text = err or ""
+            if "bzlib.h" in err_text or "ftbzip2.c" in err_text:
+                patch_ok, patch_err = _patch_freetype_bzip2_sources(profile.repo_dir)
+                if patch_ok:
+                    stub_ok, stub_err = _ensure_freetype_bzlib_stub(profile.repo_dir)
+                    if stub_ok:
+                        retry_build = list(build_cmd)
+                        print(f"[retry] freetype bzlib issue; retry build: {' '.join(retry_build)}")
+                        ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                    else:
+                        err = stub_err or err
+                else:
+                    err = patch_err or err
             err_text = err or ""
             if (
                 "detect.mk" in err_text
