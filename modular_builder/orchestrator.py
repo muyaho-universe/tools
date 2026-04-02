@@ -348,6 +348,17 @@ def _patch_openvpn_disable_lzo(repo_dir: Path) -> tuple[bool, str]:
         "if test x$have_lzo = xno && test x$enable_comp_lzo = xyes; then",
         "if false; then # patched: disable strict comp-lzo requirement",
     )
+    new = new.replace(
+        "if test \"x$have_lzo\" != \"xyes\"; then",
+        "if false; then # patched: disable strict lzo requirement",
+    )
+    new = new.replace(
+        "if test \"x$enable_lzo\" = \"xyes\" -a \"x$have_lzo\" != \"xyes\"; then",
+        "if false; then # patched: disable strict lzo requirement",
+    )
+    # Force final flags off in generated configure state machine.
+    new = re.sub(r"\benable_lzo=\$\{enable_lzo-yes\}", "enable_lzo=no", new)
+    new = re.sub(r"\benable_comp_lzo=\$\{enable_comp_lzo-yes\}", "enable_comp_lzo=no", new)
     if new != text:
         try:
             cfg.write_text(new, encoding="utf-8")
@@ -587,34 +598,35 @@ def _build_once(
                 configure_cmd = ["perl", "Configure", "linux-x86_64", "no-shared", "no-asm"]
             else:
                 configure_cmd = _render_tokens(profile.configure_cmd, variant)
-            if profile.name == "freetype" and not (profile.repo_dir / "configure").exists():
-                # Old freetype tags build via builds/unix/configure(.raw).
+            if profile.name == "freetype":
+                # Force legacy freetype to configure from builds/unix consistently.
                 unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
                 raw_cfg = profile.repo_dir / "builds" / "unix" / "configure.raw"
-                if unix_cfg.exists() and not _looks_like_autoconf_input(unix_cfg):
-                    ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir, env)
-                    if not ok:
-                        err = aux_err
-                        configure_cmd = []
-                    ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir / "builds", env)
-                    if not ok:
-                        err = aux_err
-                        configure_cmd = []
-                    ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir / "builds" / "unix", env)
-                    if not ok:
-                        err = aux_err
-                        configure_cmd = []
+                ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir, env)
+                if not ok:
+                    err = aux_err
+                    configure_cmd = []
+                ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir / "builds", env)
+                if not ok:
+                    err = aux_err
+                    configure_cmd = []
+                ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir / "builds" / "unix", env)
+                if not ok:
+                    err = aux_err
+                    configure_cmd = []
+
+                if configure_cmd:
+                    if (not unix_cfg.exists()) or _looks_like_autoconf_input(unix_cfg):
+                        if raw_cfg.exists():
+                            configure_cmd = [
+                                "bash",
+                                "-lc",
+                                "cd builds/unix && autoconf -o configure configure.raw && chmod +x configure && ./configure",
+                            ]
+                        else:
+                            configure_cmd = []
                     else:
                         configure_cmd = ["bash", "-lc", "cd builds/unix && ./configure"]
-                elif raw_cfg.exists():
-                    configure_cmd = [
-                        "bash",
-                        "-lc",
-                        "cd builds/unix && autoconf -o configure configure.raw && chmod +x configure && "
-                        "test -x ../install-sh || true && bash ./configure",
-                    ]
-                else:
-                    configure_cmd = []
             if configure_cmd:
                 ok, err = run_cmd(
                     configure_cmd,
