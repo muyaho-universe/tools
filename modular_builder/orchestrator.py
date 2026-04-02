@@ -367,6 +367,37 @@ def _patch_openvpn_disable_lzo(repo_dir: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _sanitize_freetype_configure(configure_path: Path) -> tuple[bool, str]:
+    """
+    Some historical freetype snapshots leave autoconf macros unexpanded in the generated
+    configure script (e.g., PKG_PROG_PKG_CONFIG), which breaks shell parsing.
+    Replace those lines with harmless no-ops so configure can proceed.
+    """
+    if not configure_path.exists():
+        return True, ""
+    try:
+        text = configure_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        return False, str(exc)
+
+    new_lines: list[str] = []
+    changed = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("PKG_PROG_PKG_CONFIG(") or stripped.startswith("PKG_CHECK_MODULES("):
+            new_lines.append(": # patched unexpanded pkg-config macro")
+            changed = True
+        else:
+            new_lines.append(line)
+    if not changed:
+        return True, ""
+    try:
+        configure_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    except OSError as exc:
+        return False, str(exc)
+    return True, ""
+
+
 def _patch_openssl_fileglob_issue(repo_dir: Path) -> tuple[bool, str]:
     targets = [repo_dir / "Configure", repo_dir / "test" / "build.info"]
     pattern = re.compile(r"qw\s*[\(/]\s*:?\s*glob\s*[\)/]")
@@ -621,11 +652,18 @@ def _build_once(
                             configure_cmd = [
                                 "bash",
                                 "-lc",
-                                "cd builds/unix && autoconf -o configure configure.raw && chmod +x configure && ./configure",
+                                "cd builds/unix && autoconf -o configure configure.raw && "
+                                "sed -i '/^PKG_PROG_PKG_CONFIG(/c\\: # patched unexpanded pkg-config macro' configure && "
+                                "sed -i '/^PKG_CHECK_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
+                                "chmod +x configure && ./configure",
                             ]
                         else:
                             configure_cmd = []
                     else:
+                        ok, san_err = _sanitize_freetype_configure(unix_cfg)
+                        if not ok:
+                            err = san_err
+                            configure_cmd = []
                         configure_cmd = ["bash", "-lc", "cd builds/unix && ./configure"]
             if configure_cmd:
                 ok, err = run_cmd(
@@ -645,6 +683,9 @@ def _build_once(
                     "bash ./configure",
                 ]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
+                unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
+                if unix_cfg.exists():
+                    _sanitize_freetype_configure(unix_cfg)
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
             if (not ok) and profile.name == "openvpn":
                 cfg_retries = [
@@ -665,6 +706,8 @@ def _build_once(
                     cfg_env["enable_lzo"] = "no"
                     cfg_env["enable_comp_lzo"] = "no"
                     cfg_env["enable_lz4"] = "no"
+                    cfg_env["have_lzo"] = "yes"
+                    cfg_env["have_comp_lzo"] = "yes"
                     ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=cfg_env)
                     if ok:
                         err = ""
@@ -866,6 +909,8 @@ def _build_once(
                     lzo_env["enable_lzo"] = "no"
                     lzo_env["enable_comp_lzo"] = "no"
                     lzo_env["enable_lz4"] = "no"
+                    lzo_env["have_lzo"] = "yes"
+                    lzo_env["have_comp_lzo"] = "yes"
                     ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=lzo_env)
                     if not ok:
                         err = cfg_err or err
