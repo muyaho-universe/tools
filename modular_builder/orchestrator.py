@@ -130,6 +130,12 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
         ok, err = _ensure_freetype_bzlib_stub(profile.repo_dir)
         if not ok:
             return False, err
+        ok, err = _patch_freetype_png_sources(profile.repo_dir)
+        if not ok:
+            return False, err
+        ok, err = _ensure_freetype_png_stub(profile.repo_dir)
+        if not ok:
+            return False, err
 
     # Some historical tags do not ship ./configure, but can still generate it.
     configure_missing = bool(profile.configure_cmd) and profile.configure_cmd[0] == "./configure" and not configure_path.exists()
@@ -590,6 +596,104 @@ def _ensure_freetype_bzlib_stub(repo_dir: Path) -> tuple[bool, str]:
             return False, str(exc)
     if written_any:
         print("[freetype-fix] created bzlib.h compatibility stubs")
+    return True, ""
+
+
+def _patch_freetype_png_sources(repo_dir: Path) -> tuple[bool, str]:
+    """
+    Force pngshim sources to include local png.h stub so builds don't depend on host libpng-dev.
+    """
+    changed_any = False
+    targets: list[Path] = []
+    for p in repo_dir.glob("**/pngshim.c"):
+        targets.append(p)
+    if not targets:
+        return True, ""
+    for path in targets:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return False, str(exc)
+        new = re.sub(
+            r'^\s*#\s*include\s*[<"]png\.h[>"].*$',
+            '#include "png.h" /* patched local stub */',
+            text,
+            flags=re.M,
+        )
+        if "png.h" not in new:
+            lines = new.splitlines()
+            insert_at = 0
+            for i, ln in enumerate(lines[:80]):
+                if ln.startswith("#include"):
+                    insert_at = i + 1
+            lines.insert(insert_at, '#include "png.h" /* patched local stub */')
+            new = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+        if new != text:
+            try:
+                path.write_text(new, encoding="utf-8")
+                changed_any = True
+            except OSError as exc:
+                return False, str(exc)
+    if changed_any:
+        print("[freetype-fix] patched pngshim sources to use local png.h stub")
+    return True, ""
+
+
+def _ensure_freetype_png_stub(repo_dir: Path) -> tuple[bool, str]:
+    header_text = (
+        "#ifndef PNG_H\n"
+        "#define PNG_H\n"
+        "typedef unsigned char png_byte;\n"
+        "typedef unsigned int png_uint_32;\n"
+        "typedef int png_int_32;\n"
+        "typedef unsigned char* png_bytep;\n"
+        "typedef png_uint_32* png_uint_32p;\n"
+        "typedef void* png_voidp;\n"
+        "typedef void (*png_error_ptr)(png_voidp, const char*);\n"
+        "typedef void (*png_rw_ptr)(png_voidp, png_bytep, unsigned long);\n"
+        "typedef struct png_struct_def { int _dummy; } png_struct;\n"
+        "typedef struct png_info_def { int _dummy; } png_info;\n"
+        "typedef png_struct* png_structp;\n"
+        "typedef png_info* png_infop;\n"
+        "typedef png_infop* png_infopp;\n"
+        "#define PNG_LIBPNG_VER_STRING \"stub\"\n"
+        "#define PNG_COLOR_TYPE_PALETTE 3\n"
+        "#define PNG_INFO_tRNS 0x0010\n"
+        "static inline png_structp png_create_read_struct(const char* v, png_voidp e, png_error_ptr f, png_error_ptr g){(void)v;(void)e;(void)f;(void)g;return (png_structp)0;}\n"
+        "static inline png_infop png_create_info_struct(png_structp p){(void)p;return (png_infop)0;}\n"
+        "static inline void png_destroy_read_struct(png_structp* p, png_infopp i, png_infopp e){(void)p;(void)i;(void)e;}\n"
+        "static inline void png_set_read_fn(png_structp p, png_voidp io, png_rw_ptr fn){(void)p;(void)io;(void)fn;}\n"
+        "static inline void png_read_info(png_structp p, png_infop i){(void)p;(void)i;}\n"
+        "static inline png_uint_32 png_get_IHDR(png_structp p, png_infop i, png_uint_32p w, png_uint_32p h, int* bd, int* ct, int* im, int* cm, int* fm){(void)p;(void)i;if(w)*w=0;if(h)*h=0;if(bd)*bd=8;if(ct)*ct=0;if(im)*im=0;if(cm)*cm=0;if(fm)*fm=0;return 0;}\n"
+        "static inline png_uint_32 png_get_valid(png_structp p, png_infop i, png_uint_32 f){(void)p;(void)i;(void)f;return 0;}\n"
+        "static inline void png_set_expand_gray_1_2_4_to_8(png_structp p){(void)p;}\n"
+        "static inline void png_set_palette_to_rgb(png_structp p){(void)p;}\n"
+        "static inline void png_set_tRNS_to_alpha(png_structp p){(void)p;}\n"
+        "static inline void png_set_strip_16(png_structp p){(void)p;}\n"
+        "static inline void png_set_packing(png_structp p){(void)p;}\n"
+        "static inline void png_read_update_info(png_structp p, png_infop i){(void)p;(void)i;}\n"
+        "static inline unsigned long png_get_rowbytes(png_structp p, png_infop i){(void)p;(void)i;return 0;}\n"
+        "static inline void png_read_image(png_structp p, png_bytep* r){(void)p;(void)r;}\n"
+        "static inline void png_read_end(png_structp p, png_infop i){(void)p;(void)i;}\n"
+        "#define png_jmpbuf(p) (*(void**)(p))\n"
+        "#endif\n"
+    )
+    written_any = False
+    for header in [
+        repo_dir / "png.h",
+        repo_dir / "include" / "png.h",
+        repo_dir / "src" / "sfnt" / "png.h",
+    ]:
+        if header.exists():
+            continue
+        try:
+            header.parent.mkdir(parents=True, exist_ok=True)
+            header.write_text(header_text, encoding="utf-8")
+            written_any = True
+        except OSError as exc:
+            return False, str(exc)
+    if written_any:
+        print("[freetype-fix] created png.h compatibility stubs")
     return True, ""
 
 
@@ -1139,6 +1243,19 @@ def _build_once(
                     if stub_ok:
                         retry_build = list(build_cmd)
                         print(f"[retry] freetype bzlib issue; retry build: {' '.join(retry_build)}")
+                        ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                    else:
+                        err = stub_err or err
+                else:
+                    err = patch_err or err
+            err_text = err or ""
+            if "png.h" in err_text or "pngshim.c" in err_text:
+                patch_ok, patch_err = _patch_freetype_png_sources(profile.repo_dir)
+                if patch_ok:
+                    stub_ok, stub_err = _ensure_freetype_png_stub(profile.repo_dir)
+                    if stub_ok:
+                        retry_build = list(build_cmd)
+                        print(f"[retry] freetype png issue; retry build: {' '.join(retry_build)}")
                         ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
                     else:
                         err = stub_err or err
