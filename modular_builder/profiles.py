@@ -141,7 +141,12 @@ def build_profiles() -> dict[str, BuildProfile]:
             build_cmd=["make"],
             clean_cmd=["make", "clean"],
             env_overrides={**base, "CPPFLAGS": "-I/usr/include -I/usr/include/x86_64-linux-gnu", "LDFLAGS": "-L/usr/lib/x86_64-linux-gnu -L/lib/x86_64-linux-gnu"},
-            artifact_globs=["objs/.libs/libfreetype.so*", "objs/.libs/libfreetype.a"],
+            artifact_globs=[
+                "objs/.libs/libfreetype.so*",
+                "objs/.libs/libfreetype.a",
+                "build_freetype_fallback/**/*.so*",
+                "build_freetype_fallback/**/*.a",
+            ],
         ),
         "expat": BuildProfile(
             name="expat",

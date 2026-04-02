@@ -341,12 +341,12 @@ def _patch_openvpn_disable_lzo(repo_dir: Path) -> tuple[bool, str]:
     new = new.replace("configure: error: lzo enabled but missing", "configure: warning: lzo check bypassed")
     new = re.sub(
         r"(as_fn_error .*lzo enabled but missing.*)",
-        r": # lzo failure bypassed by modular_builder",
+        "true",
         new,
     )
     new = re.sub(
         r"as_fn_error[^\n]*lzo check bypassed[^\n]*",
-        r": # lzo failure bypassed by modular_builder",
+        "true",
         new,
     )
     # Disable explicit conditional guards that hard-fail when LZO is missing.
@@ -373,7 +373,7 @@ def _patch_openvpn_disable_lzo(repo_dir: Path) -> tuple[bool, str]:
     patched_lines: list[str] = []
     for ln in new.splitlines():
         if "as_fn_error" in ln and "lzo" in ln.lower():
-            patched_lines.append(": # lzo failure bypassed by modular_builder")
+            patched_lines.append("true")
         else:
             patched_lines.append(ln)
     new = "\n".join(patched_lines) + ("\n" if new.endswith("\n") else "")
@@ -639,6 +639,7 @@ def _build_once(
     env.update(profile.env_overrides)
     env.update(variant.env_overrides)
     openssl_safe_mode = profile.name == "openssl"
+    freetype_cmake_built = False
 
     try:
         _hard_clean_repo(profile)
@@ -719,6 +720,22 @@ def _build_once(
                 if unix_cfg.exists():
                     _sanitize_freetype_configure(unix_cfg)
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
+            if (not ok) and profile.name == "freetype":
+                # Last resort: use cmake path to avoid fragile legacy autotools scripts.
+                cmake_build = "build_freetype_fallback"
+                cfg_try = ["cmake", "-S", ".", "-B", cmake_build, "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON"]
+                print(f"[retry] freetype autotools failed; trying cmake fallback: {' '.join(cfg_try)}")
+                ok, cfg_err = run_cmd(cfg_try, cwd=profile.repo_dir, env=env)
+                if not ok:
+                    cfg_try = ["cmake", "-S", ".", "-B", cmake_build, "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF"]
+                    print(f"[retry] freetype cmake shared build failed; trying static: {' '.join(cfg_try)}")
+                    ok, cfg_err = run_cmd(cfg_try, cwd=profile.repo_dir, env=env)
+                if ok:
+                    build_try = ["cmake", "--build", cmake_build, "-j", str(max(1, os.cpu_count() or 1))]
+                    ok, err = run_cmd(build_try, cwd=profile.repo_dir, env=env)
+                    freetype_cmake_built = ok
+                else:
+                    err = cfg_err or err
             if (not ok) and profile.name == "openvpn":
                 cfg_retries = [
                     ["./configure", "--disable-plugin-auth-pam", "--disable-comp-lzo", "--disable-lz4"],
@@ -805,6 +822,8 @@ def _build_once(
                     return []
 
         build_cmd = _render_tokens(profile.build_cmd, variant)
+        if profile.name == "freetype" and freetype_cmake_built:
+            build_cmd = []
         if openssl_safe_mode:
             build_cmd = ["make", "build_libs"]
         if build_cmd == ["make"]:
@@ -815,7 +834,10 @@ def _build_once(
         if build_cmd and build_cmd[0] == "make" and not any(t.startswith("-j") for t in build_cmd[1:]):
             jobs = 1 if (profile.name == "openssl" and variant.compiler == "clang") else max(1, os.cpu_count() or 1)
             build_cmd.append(f"-j{jobs}")
-        ok, err = run_cmd(build_cmd, cwd=profile.repo_dir, env=env)
+        if build_cmd:
+            ok, err = run_cmd(build_cmd, cwd=profile.repo_dir, env=env)
+        else:
+            ok, err = True, ""
         if (not ok) and openssl_safe_mode and "No rule to make target" in (err or "") and "build_libs" in (err or ""):
             retry_cmd = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
             print(f"[retry] openssl release build_libs target missing; trying: {' '.join(retry_cmd)}")
