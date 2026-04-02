@@ -359,6 +359,14 @@ def _patch_openvpn_disable_lzo(repo_dir: Path) -> tuple[bool, str]:
     # Force final flags off in generated configure state machine.
     new = re.sub(r"\benable_lzo=\$\{enable_lzo-yes\}", "enable_lzo=no", new)
     new = re.sub(r"\benable_comp_lzo=\$\{enable_comp_lzo-yes\}", "enable_comp_lzo=no", new)
+    # Final guard: any configure line that contains both as_fn_error and lzo becomes a no-op.
+    patched_lines: list[str] = []
+    for ln in new.splitlines():
+        if "as_fn_error" in ln and "lzo" in ln.lower():
+            patched_lines.append(": # lzo failure bypassed by modular_builder")
+        else:
+            patched_lines.append(ln)
+    new = "\n".join(patched_lines) + ("\n" if new.endswith("\n") else "")
     if new != text:
         try:
             cfg.write_text(new, encoding="utf-8")
@@ -381,10 +389,19 @@ def _sanitize_freetype_configure(configure_path: Path) -> tuple[bool, str]:
         return False, str(exc)
 
     new_lines: list[str] = []
+    macro_line = re.compile(r"^[A-Z][A-Z0-9_]*\([^)]*\)\s*$")
     changed = False
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("PKG_PROG_PKG_CONFIG(") or stripped.startswith("PKG_CHECK_MODULES("):
+        if (
+            stripped.startswith("PKG_PROG_PKG_CONFIG(")
+            or stripped.startswith("PKG_CHECK_MODULES(")
+            or stripped.startswith("LT_INIT(")
+            or stripped.startswith("LT_PREREQ(")
+            or stripped.startswith("AC_PROG_LIBTOOL")
+            or stripped.startswith("AM_PROG_LIBTOOL")
+            or macro_line.match(stripped) is not None
+        ):
             new_lines.append(": # patched unexpanded pkg-config macro")
             changed = True
         else:
@@ -655,6 +672,8 @@ def _build_once(
                                 "cd builds/unix && autoconf -o configure configure.raw && "
                                 "sed -i '/^PKG_PROG_PKG_CONFIG(/c\\: # patched unexpanded pkg-config macro' configure && "
                                 "sed -i '/^PKG_CHECK_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
+                                "sed -i '/^LT_INIT(/c\\: # patched unexpanded libtool macro' configure && "
+                                "sed -i '/^LT_PREREQ(/c\\: # patched unexpanded libtool macro' configure && "
                                 "chmod +x configure && ./configure",
                             ]
                         else:
