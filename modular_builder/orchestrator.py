@@ -340,13 +340,13 @@ def _patch_openvpn_disable_lzo(repo_dir: Path) -> tuple[bool, str]:
     # Neutralize hard failure branches related to missing LZO.
     new = new.replace("configure: error: lzo enabled but missing", "configure: warning: lzo check bypassed")
     new = re.sub(
-        r"(as_fn_error .*lzo enabled but missing.*)",
-        "true",
+        r"as_fn_error([^\n]*lzo enabled but missing[^\n]*)",
+        r"echo\1",
         new,
     )
     new = re.sub(
-        r"as_fn_error[^\n]*lzo check bypassed[^\n]*",
-        "true",
+        r"as_fn_error([^\n]*lzo check bypassed[^\n]*)",
+        r"echo\1",
         new,
     )
     # Disable explicit conditional guards that hard-fail when LZO is missing.
@@ -369,14 +369,6 @@ def _patch_openvpn_disable_lzo(repo_dir: Path) -> tuple[bool, str]:
     # Force final flags off in generated configure state machine.
     new = re.sub(r"\benable_lzo=\$\{enable_lzo-yes\}", "enable_lzo=no", new)
     new = re.sub(r"\benable_comp_lzo=\$\{enable_comp_lzo-yes\}", "enable_comp_lzo=no", new)
-    # Final guard: any configure line that contains both as_fn_error and lzo becomes a no-op.
-    patched_lines: list[str] = []
-    for ln in new.splitlines():
-        if "as_fn_error" in ln and "lzo" in ln.lower():
-            patched_lines.append("true")
-        else:
-            patched_lines.append(ln)
-    new = "\n".join(patched_lines) + ("\n" if new.endswith("\n") else "")
     if new != text:
         try:
             cfg.write_text(new, encoding="utf-8")
@@ -399,8 +391,6 @@ def _sanitize_freetype_configure(configure_path: Path) -> tuple[bool, str]:
         return False, str(exc)
 
     new_lines: list[str] = []
-    macro_line = re.compile(r"^[A-Z][A-Z0-9_]*\([^)]*\)\s*$")
-    bare_macro_line = re.compile(r"^[A-Z][A-Z0-9_]*$")
     changed = False
     for line in text.splitlines():
         stripped = line.strip()
@@ -411,8 +401,7 @@ def _sanitize_freetype_configure(configure_path: Path) -> tuple[bool, str]:
             or stripped.startswith("LT_PREREQ(")
             or stripped.startswith("AC_PROG_LIBTOOL")
             or stripped.startswith("AM_PROG_LIBTOOL")
-            or macro_line.match(stripped) is not None
-            or bare_macro_line.match(stripped) is not None
+            or stripped == "FT_MUNMAP_PARAM"
             or stripped.endswith(", :)")
         ):
             new_lines.append(": # patched unexpanded pkg-config macro")
@@ -723,11 +712,35 @@ def _build_once(
             if (not ok) and profile.name == "freetype":
                 # Last resort: use cmake path to avoid fragile legacy autotools scripts.
                 cmake_build = "build_freetype_fallback"
-                cfg_try = ["cmake", "-S", ".", "-B", cmake_build, "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON"]
+                cfg_try = [
+                    "cmake",
+                    "-S",
+                    ".",
+                    "-B",
+                    cmake_build,
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DBUILD_SHARED_LIBS=ON",
+                    "-DFT_DISABLE_BZIP2=TRUE",
+                    "-DFT_DISABLE_PNG=TRUE",
+                    "-DFT_DISABLE_HARFBUZZ=TRUE",
+                    "-DFT_DISABLE_BROTLI=TRUE",
+                ]
                 print(f"[retry] freetype autotools failed; trying cmake fallback: {' '.join(cfg_try)}")
                 ok, cfg_err = run_cmd(cfg_try, cwd=profile.repo_dir, env=env)
                 if not ok:
-                    cfg_try = ["cmake", "-S", ".", "-B", cmake_build, "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF"]
+                    cfg_try = [
+                        "cmake",
+                        "-S",
+                        ".",
+                        "-B",
+                        cmake_build,
+                        "-DCMAKE_BUILD_TYPE=Release",
+                        "-DBUILD_SHARED_LIBS=OFF",
+                        "-DFT_DISABLE_BZIP2=TRUE",
+                        "-DFT_DISABLE_PNG=TRUE",
+                        "-DFT_DISABLE_HARFBUZZ=TRUE",
+                        "-DFT_DISABLE_BROTLI=TRUE",
+                    ]
                     print(f"[retry] freetype cmake shared build failed; trying static: {' '.join(cfg_try)}")
                     ok, cfg_err = run_cmd(cfg_try, cwd=profile.repo_dir, env=env)
                 if ok:
