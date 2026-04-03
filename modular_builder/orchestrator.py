@@ -1324,6 +1324,7 @@ def _build_once(
                 or "unix-cc.mk" in err_text
                 or "Permission denied" in err_text
                 or "AC_INIT(" in err_text
+                or "No targets specified and no makefile found" in err_text
             ):
                 bootstrap_cmd = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && bash ./configure"]
                 print(f"[retry] freetype build failed; trying bootstrap: {' '.join(bootstrap_cmd)}")
