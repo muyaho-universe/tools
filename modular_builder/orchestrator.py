@@ -889,6 +889,21 @@ def _resolve_artifacts_for_variant(profile: BuildProfile, row: BuildRow, ref_kin
             if p.is_file() and is_real_binary_or_library(p):
                 found.append(p)
                 break
+    if found:
+        return found
+
+    # Last resort for legacy freetype tags: keep any tangible libfreetype file.
+    if profile.name == "freetype":
+        loose_patterns = [
+            "**/libfreetype.so*",
+            "**/libfreetype.a",
+            "**/libfreetype.la",
+            "**/freetype.lib",
+        ]
+        for pattern in loose_patterns:
+            for p in sorted(profile.repo_dir.glob(pattern)):
+                if p.is_file():
+                    return [p]
     return found
 
 
