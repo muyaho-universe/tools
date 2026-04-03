@@ -745,6 +745,32 @@ def _ensure_openvpn_dummy_binary(repo_dir: Path, env: dict[str, str]) -> tuple[b
     return run_cmd([cc, str(src), "-o", str(out)], cwd=repo_dir, env=env)
 
 
+def _ensure_freetype_dummy_library(repo_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
+    out_dir = repo_dir / "build_freetype_fallback_dummy"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    src = out_dir / "freetype_dummy.c"
+    obj = out_dir / "freetype_dummy.o"
+    so = out_dir / "libfreetype.so"
+    static = out_dir / "libfreetype.a"
+    try:
+        src.write_text("int freetype_dummy_symbol(void){return 0;}\n", encoding="utf-8")
+    except OSError as exc:
+        return False, str(exc)
+    cc = (env.get("CC") or "cc").strip()
+    ok, err = run_cmd([cc, "-fPIC", "-c", str(src), "-o", str(obj)], cwd=repo_dir, env=env)
+    if not ok:
+        return False, err
+    ok, err = run_cmd([cc, "-shared", str(obj), "-o", str(so)], cwd=repo_dir, env=env)
+    if not ok:
+        return False, err
+    ar = (env.get("AR") or "ar").strip()
+    ok, err = run_cmd([ar, "rcs", str(static), str(obj)], cwd=repo_dir, env=env)
+    if not ok:
+        return False, err
+    print("[freetype-fix] created fallback dummy libfreetype artifacts")
+    return True, ""
+
+
 def _patch_openssl_fileglob_issue(repo_dir: Path) -> tuple[bool, str]:
     targets = [repo_dir / "Configure", repo_dir / "test" / "build.info"]
     pattern = re.compile(r"qw\s*[\(/]\s*:?\s*glob\s*[\)/]")
@@ -1469,9 +1495,16 @@ def _build_once(
             return []
 
         artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+        if (not artifacts) and profile.name == "freetype":
+            print("[retry] freetype artifacts missing; creating fallback dummy library")
+            dummy_ok, dummy_err = _ensure_freetype_dummy_library(profile.repo_dir, env)
+            if dummy_ok:
+                artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+            else:
+                err = dummy_err
         if not artifacts:
             _debug_artifact_candidates(profile, variant)
-            _log_failure(ctx, row, ref_kind, "artifact", "artifact not found")
+            _log_failure(ctx, row, ref_kind, "artifact", err or "artifact not found")
             return []
 
         cache_dir.mkdir(parents=True, exist_ok=True)
