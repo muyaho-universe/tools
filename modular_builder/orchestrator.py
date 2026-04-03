@@ -413,6 +413,8 @@ def _sanitize_freetype_configure(configure_path: Path) -> tuple[bool, str]:
         if (
             stripped.startswith("PKG_PROG_PKG_CONFIG(")
             or stripped.startswith("PKG_CHECK_MODULES(")
+            or stripped.startswith("PKG_CHECK_EXISTS(")
+            or stripped.startswith("PKG_WITH_MODULES(")
             or stripped.startswith("LT_INIT(")
             or stripped.startswith("LT_PREREQ(")
             or stripped.startswith("AC_PROG_LIBTOOL")
@@ -1005,10 +1007,12 @@ def _build_once(
                                 "bash",
                                 "-lc",
                                 "cd builds/unix && autoconf -o configure configure.raw && "
-                                "sed -i '/^PKG_PROG_PKG_CONFIG(/c\\: # patched unexpanded pkg-config macro' configure && "
-                                "sed -i '/^PKG_CHECK_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
-                                "sed -i '/^LT_INIT(/c\\: # patched unexpanded libtool macro' configure && "
-                                "sed -i '/^LT_PREREQ(/c\\: # patched unexpanded libtool macro' configure && "
+                                "sed -i '/^[[:space:]]*PKG_PROG_PKG_CONFIG(/c\\: # patched unexpanded pkg-config macro' configure && "
+                                "sed -i '/^[[:space:]]*PKG_CHECK_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
+                                "sed -i '/^[[:space:]]*PKG_CHECK_EXISTS(/c\\: # patched unexpanded pkg-config macro' configure && "
+                                "sed -i '/^[[:space:]]*PKG_WITH_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
+                                "sed -i '/^[[:space:]]*LT_INIT(/c\\: # patched unexpanded libtool macro' configure && "
+                                "sed -i '/^[[:space:]]*LT_PREREQ(/c\\: # patched unexpanded libtool macro' configure && "
                                 "chmod +x configure && ./configure",
                             ]
                         else:
