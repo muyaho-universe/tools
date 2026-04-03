@@ -1187,6 +1187,9 @@ def _build_once(
                     return []
 
         build_cmd = _render_tokens(profile.build_cmd, variant)
+        if profile.name == "freetype" and not freetype_cmake_built:
+            # Legacy freetype autotools flow builds artifacts under builds/unix.
+            build_cmd = ["make", "-C", "builds/unix"]
         if profile.name == "freetype" and freetype_cmake_built:
             build_cmd = []
         if openssl_safe_mode:

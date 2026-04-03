@@ -144,6 +144,12 @@ def build_profiles() -> dict[str, BuildProfile]:
             artifact_globs=[
                 "objs/.libs/libfreetype.so*",
                 "objs/.libs/libfreetype.a",
+                "objs/libfreetype.a",
+                "objs/libfreetype.so*",
+                "builds/unix/objs/.libs/libfreetype.so*",
+                "builds/unix/objs/.libs/libfreetype.a",
+                "builds/unix/objs/libfreetype.a",
+                "builds/unix/objs/libfreetype.so*",
                 "build_freetype_fallback/**/*.so*",
                 "build_freetype_fallback/**/*.a",
             ],
