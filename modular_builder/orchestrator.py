@@ -1188,8 +1188,14 @@ def _build_once(
 
         build_cmd = _render_tokens(profile.build_cmd, variant)
         if profile.name == "freetype" and not freetype_cmake_built:
-            # Legacy freetype autotools flow builds artifacts under builds/unix.
-            build_cmd = ["make", "-C", "builds/unix"]
+            # Legacy freetype tags vary: Makefile can be generated at top-level or builds/unix.
+            if (profile.repo_dir / "builds" / "unix" / "Makefile").exists():
+                build_cmd = ["make", "-C", "builds/unix"]
+            elif (profile.repo_dir / "Makefile").exists():
+                build_cmd = ["make"]
+            else:
+                # Default to builds/unix; failure path will bootstrap/re-pick automatically.
+                build_cmd = ["make", "-C", "builds/unix"]
         if profile.name == "freetype" and freetype_cmake_built:
             build_cmd = []
         if openssl_safe_mode:
@@ -1330,9 +1336,37 @@ def _build_once(
                 print(f"[retry] freetype build failed; trying bootstrap: {' '.join(bootstrap_cmd)}")
                 setup_ok, setup_err = run_cmd(bootstrap_cmd, cwd=profile.repo_dir, env=env)
                 if setup_ok:
-                    retry_build = list(build_cmd)
-                    print(f"[retry] freetype bootstrap done; retry build: {' '.join(retry_build)}")
-                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                    # Re-pick make target based on where Makefile actually exists.
+                    if (profile.repo_dir / "builds" / "unix" / "Makefile").exists():
+                        retry_build = ["make", "-C", "builds/unix", f"-j{max(1, os.cpu_count() or 1)}"]
+                    elif (profile.repo_dir / "Makefile").exists():
+                        retry_build = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
+                    else:
+                        # Last resort: cmake fallback if autotools still doesn't emit Makefile.
+                        cmake_build = "build_freetype_fallback"
+                        cfg_try = [
+                            "cmake",
+                            "-S",
+                            ".",
+                            "-B",
+                            cmake_build,
+                            "-DCMAKE_BUILD_TYPE=Release",
+                            "-DBUILD_SHARED_LIBS=OFF",
+                            "-DFT_DISABLE_BZIP2=TRUE",
+                            "-DFT_DISABLE_PNG=TRUE",
+                            "-DFT_DISABLE_HARFBUZZ=TRUE",
+                            "-DFT_DISABLE_BROTLI=TRUE",
+                        ]
+                        print(f"[retry] freetype no makefile after bootstrap; trying cmake fallback: {' '.join(cfg_try)}")
+                        ok, cfg_err = run_cmd(cfg_try, cwd=profile.repo_dir, env=env)
+                        if ok:
+                            retry_build = ["cmake", "--build", cmake_build, "-j", str(max(1, os.cpu_count() or 1))]
+                        else:
+                            retry_build = []
+                            err = cfg_err or err
+                    if retry_build:
+                        print(f"[retry] freetype bootstrap done; retry build: {' '.join(retry_build)}")
+                        ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
                 else:
                     err = setup_err or err
         if (not ok) and profile.name == "openvpn":
