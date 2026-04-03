@@ -1701,13 +1701,7 @@ def _process_releases(profile: BuildProfile, row: BuildRow, ctx: BuildContext) -
     )
 
     variants = _release_variants()
-    if profile.name == "openssl":
-        variants = [v for v in variants if v.compiler == "gcc"]
-        print("[release-variants] openssl: using gcc-only variants to avoid clang assembler incompatibilities")
-    if profile.name == "openssl":
-        print(f"[release-variants] count={len(variants)} (gcc x O0..O3, no -g)")
-    else:
-        print(f"[release-variants] count={len(variants)} (gcc/clang x O0..O3, no -g)")
+    print(f"[release-variants] count={len(variants)} (gcc/clang x O0..O3, no -g)")
     tasks: list[tuple[str, str, BuildVariant]] = []
     for tag in tags:
         ref = tag.tag
