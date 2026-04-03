@@ -1723,6 +1723,7 @@ def _process_releases(profile: BuildProfile, row: BuildRow, ctx: BuildContext) -
         return
 
     worktree_root = ctx.output_root / "_worktrees"
+    worktree_root.mkdir(parents=True, exist_ok=True)
     with ThreadPoolExecutor(max_workers=ctx.parallel_workers) as ex:
         futures = [
             ex.submit(_build_once_isolated_worktree, profile, row, ref, kind, variant, ctx, worktree_root)
@@ -1747,7 +1748,7 @@ def _build_once_isolated_worktree(
     worktree_root: Path,
 ) -> tuple[str, BuildVariant, list[Path]] | None:
     wt_name = f"{profile.name}_{kind}_{variant.key}_{uuid.uuid4().hex[:8]}"
-    wt_dir = worktree_root / wt_name
+    wt_dir = (worktree_root / wt_name).resolve()
     wt_dir.parent.mkdir(parents=True, exist_ok=True)
 
     ok, err = run_cmd(
@@ -1778,8 +1779,9 @@ def run_pipeline(
     parallel_workers: int = 1,
 ) -> list[str]:
     profiles = build_profiles()
+    resolved_output_root = Path(output_root).expanduser().resolve()
     ctx = BuildContext(
-        output_root=Path(output_root),
+        output_root=resolved_output_root,
         failures=[],
         built_cache=set(),
         parallel_workers=max(1, int(parallel_workers)),
