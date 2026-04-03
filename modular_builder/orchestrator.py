@@ -468,8 +468,8 @@ def _patch_freetype_optional_features(repo_dir: Path) -> tuple[bool, str]:
             except OSError as exc:
                 return False, str(exc)
 
-    # Some legacy freetype trees still include bzip2 module unconditionally via modules.cfg.
-    # Remove bzip2-related module lines so ftbzip2.c is not compiled.
+    # Some legacy freetype trees still include optional modules unconditionally via modules.cfg.
+    # Remove bzip2/png-related module lines so shim sources are not compiled.
     module_files: list[Path] = []
     for p in repo_dir.glob("**/modules.cfg"):
         module_files.append(p)
@@ -485,12 +485,40 @@ def _patch_freetype_optional_features(repo_dir: Path) -> tuple[bool, str]:
         mod_changed = False
         for ln in lines:
             low = ln.lower()
-            if ("bzip2" in low) or ("ftbzip2.c" in low):
+            if ("bzip2" in low) or ("ftbzip2.c" in low) or ("png" in low) or ("pngshim.c" in low):
                 new_lines.append(f"# {ln}")
                 mod_changed = True
             else:
                 new_lines.append(ln)
         if mod_changed:
+            try:
+                path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+                changed_any = True
+            except OSError as exc:
+                return False, str(exc)
+    # Some tags enumerate optional shim sources in rules.mk directly.
+    # Comment out png/bzip2 shim source lines to avoid hard header dependencies.
+    rule_files: list[Path] = []
+    for p in repo_dir.glob("**/rules.mk"):
+        rule_files.append(p)
+    for p in repo_dir.glob("**/rules.mk.in"):
+        rule_files.append(p)
+    for path in rule_files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return False, str(exc)
+        lines = text.splitlines()
+        new_lines: list[str] = []
+        rule_changed = False
+        for ln in lines:
+            low = ln.lower()
+            if ("pngshim.c" in low) or ("ftbzip2.c" in low):
+                new_lines.append(f"# {ln}")
+                rule_changed = True
+            else:
+                new_lines.append(ln)
+        if rule_changed:
             try:
                 path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
                 changed_any = True
@@ -683,6 +711,8 @@ def _ensure_freetype_png_stub(repo_dir: Path) -> tuple[bool, str]:
         repo_dir / "png.h",
         repo_dir / "include" / "png.h",
         repo_dir / "src" / "sfnt" / "png.h",
+        repo_dir / "builds" / "unix" / "png.h",
+        repo_dir / "builds" / "unix" / "src" / "sfnt" / "png.h",
     ]:
         if header.exists():
             continue
@@ -925,7 +955,10 @@ def _build_once(
     env.update(variant.env_overrides)
     if profile.name == "freetype":
         cpp = env.get("CPPFLAGS", "").strip()
-        env["CPPFLAGS"] = f"-I{profile.repo_dir} {cpp}".strip()
+        env["CPPFLAGS"] = (
+            f"-I{profile.repo_dir} -I{profile.repo_dir / 'include'} "
+            f"-I{profile.repo_dir / 'src' / 'sfnt'} {cpp}"
+        ).strip()
     openssl_safe_mode = profile.name == "openssl"
     freetype_cmake_built = False
 
@@ -1120,6 +1153,22 @@ def _build_once(
                 fallback_cfg = ["bash", "./configure", "--disable-doc", "--disable-asm", "--disable-inline-asm", "--disable-x86asm"]
                 print(f"[retry] FFmpeg plain configure fallback: {' '.join(fallback_cfg)}")
                 ok, err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env, quiet_stdout=False)
+            if (not ok) and profile.name == "freetype":
+                err_text = err or ""
+                if "png.h" in err_text or "pngshim.c" in err_text:
+                    patch_ok, patch_err = _patch_freetype_optional_features(profile.repo_dir)
+                    if patch_ok:
+                        patch_ok, patch_err = _patch_freetype_png_sources(profile.repo_dir)
+                    if patch_ok:
+                        stub_ok, stub_err = _ensure_freetype_png_stub(profile.repo_dir)
+                        if stub_ok:
+                            retry_cfg = ["bash", "-lc", "cd builds/unix && ./configure"]
+                            print(f"[retry] freetype configure png issue; retry: {' '.join(retry_cfg)}")
+                            ok, err = run_cmd(retry_cfg, cwd=profile.repo_dir, env=env)
+                        else:
+                            err = stub_err or err
+                    else:
+                        err = patch_err or err
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
