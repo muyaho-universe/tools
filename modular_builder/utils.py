@@ -125,7 +125,7 @@ def is_real_binary_or_library(path: Path) -> bool:
 
     if "elf" in desc:
         return True
-    if "current ar archive" in desc:
+    if "ar archive" in desc:
         return True
     if "mach-o" in desc:
         return True
