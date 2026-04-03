@@ -95,6 +95,25 @@ def _ffmpeg_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path]
     return [p for p in choices if p.exists() and is_real_binary_or_library(p)]
 
 
+def _freetype_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path]:
+    # Prefer true binary/library artifacts first.
+    real_patterns = [
+        "**/libfreetype.so*",
+        "**/libfreetype.a",
+    ]
+    for pattern in real_patterns:
+        for p in sorted(repo_dir.glob(pattern)):
+            if p.is_file() and is_real_binary_or_library(p):
+                return [p]
+
+    # Fallback for legacy/libtool flows where only .la is materialized.
+    for p in sorted(repo_dir.glob("**/libfreetype.la")):
+        if p.is_file():
+            return [p]
+
+    return []
+
+
 def build_profiles() -> dict[str, BuildProfile]:
     base = _default_env()
     return {
@@ -153,6 +172,7 @@ def build_profiles() -> dict[str, BuildProfile]:
                 "build_freetype_fallback/**/*.so*",
                 "build_freetype_fallback/**/*.a",
             ],
+            artifact_resolver=_freetype_resolver,
         ),
         "expat": BuildProfile(
             name="expat",
