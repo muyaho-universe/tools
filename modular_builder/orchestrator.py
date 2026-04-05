@@ -921,6 +921,47 @@ def _strip_werror_from_makefiles(repo_dir: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _prepare_dwg2dxf_mv_compat_env(repo_dir: Path, env: dict[str, str]) -> tuple[dict[str, str], str]:
+    """
+    Some LibreDWG tags run `mv src ./src` while generating charset headers,
+    which fails with: "are the same file". This wrapper keeps normal mv behavior
+    but treats only that specific case as success.
+    """
+    compat_dir = repo_dir / ".aio_compat_bin"
+    wrapper = compat_dir / "mv"
+    try:
+        compat_dir.mkdir(parents=True, exist_ok=True)
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            "real_mv=/bin/mv\n"
+            "if [ ! -x \"$real_mv\" ]; then\n"
+            "  real_mv=$(command -v mv)\n"
+            "fi\n"
+            "out=$($real_mv \"$@\" 2>&1)\n"
+            "status=$?\n"
+            "if [ $status -ne 0 ]; then\n"
+            "  case \"$out\" in\n"
+            "    *\"are the same file\"*) exit 0 ;;\n"
+            "  esac\n"
+            "fi\n"
+            "if [ -n \"$out\" ]; then\n"
+            "  echo \"$out\" 1>&2\n"
+            "fi\n"
+            "exit $status\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return env, str(exc)
+
+    chmod_ok, chmod_err = run_cmd(["chmod", "+x", str(wrapper)], cwd=repo_dir, env=env)
+    if not chmod_ok:
+        return env, chmod_err
+
+    compat_env = dict(env)
+    compat_env["PATH"] = f"{compat_dir}:{env.get('PATH', '')}".rstrip(":")
+    return compat_env, ""
+
+
 def _render_tokens(tokens: list[str], variant: BuildVariant) -> list[str]:
     rendered: list[str] = []
     for token in tokens:
@@ -1494,8 +1535,12 @@ def _build_once(
             err_text = err or ""
             if "are the same file" in err_text:
                 retry_cmd = ["make", "-j1"]
-                print(f"[retry] dwg2dxf race on generated headers; retry single-thread: {' '.join(retry_cmd)}")
-                ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                mv_compat_env, mv_compat_err = _prepare_dwg2dxf_mv_compat_env(profile.repo_dir, env)
+                if mv_compat_err:
+                    print(f"[warn] dwg2dxf mv compatibility wrapper setup failed: {mv_compat_err}")
+                    mv_compat_env = env
+                print(f"[retry] dwg2dxf same-file mv issue; retry with mv wrapper: {' '.join(retry_cmd)}")
+                ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=mv_compat_env)
                 err_text = err or ""
             if ("-Werror" in err_text) or ("format specifies type" in err_text):
                 strip_ok, strip_err = _strip_werror_from_makefiles(profile.repo_dir)
