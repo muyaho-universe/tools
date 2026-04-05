@@ -186,7 +186,7 @@ def build_profiles() -> dict[str, BuildProfile]:
             build_cmd=["make"],
             clean_cmd=["make", "clean"],
             env_overrides=base,
-            artifact_globs=[".libs/libexpat.so*", ".libs/libexpat.a"],
+            artifact_globs=[".libs/libexpat.so*", ".libs/libexpat.a", "**/libexpat.so*", "**/libexpat.a", "**/libexpat.la"],
         ),
         "openvpn": BuildProfile(
             name="openvpn",
@@ -269,7 +269,11 @@ def build_profiles() -> dict[str, BuildProfile]:
             pre_steps=[["./autogen.sh"]],
             build_cmd=["make"],
             clean_cmd=["make", "clean"],
-            env_overrides=base,
+            env_overrides={
+                **base,
+                "CFLAGS": (base.get("CFLAGS", "") + " -Wno-error -Wno-error=format -Wno-error=format-security").strip(),
+                "CXXFLAGS": (base.get("CXXFLAGS", "") + " -Wno-error -Wno-error=format -Wno-error=format-security").strip(),
+            },
             artifact_globs=["programs/.libs/dwg2dxf", "programs/dwg2dxf", "src/dwg2dxf"],
         ),
         "exiv2": BuildProfile(

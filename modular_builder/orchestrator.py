@@ -100,6 +100,10 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
             # Legacy freetype snapshots often lack configure.ac and fail in autogen.
             # We bootstrap from builds/unix/configure.raw instead.
             continue
+        if profile.name == "libtiff" and first.endswith("autogen.sh"):
+            # libtiff autogen on old tags tries network fetch of config.guess/config.sub.
+            # Avoid flaky network dependency; fallback autoreconf path below handles bootstrap.
+            continue
 
         if first.endswith("autogen.sh") and configure_path.exists():
             continue
@@ -1322,6 +1326,19 @@ def _build_once(
                         f"but artifacts already exist ({len(prebuilt)}); continuing"
                     )
                     ok = True
+        if (not ok) and profile.name == "expat":
+            err_text = err or ""
+            if ("docbook2x-man" in err_text) or ('Configure with --with-docbook for "make dist"' in err_text):
+                retry_plan = [
+                    ["make", "libexpat.la"],
+                    ["make", "-C", "lib", "libexpat.la"],
+                    ["make", "-C", "lib", "all"],
+                ]
+                for retry_cmd in retry_plan:
+                    print(f"[retry] expat doc tooling issue; trying library-only target: {' '.join(retry_cmd)}")
+                    ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                    if ok:
+                        break
         if (not ok) and profile.name == "pcf2bdf":
             err_text = err or ""
             if "No targets specified and no makefile found" in err_text:
@@ -1443,6 +1460,30 @@ def _build_once(
                     ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=lzo_env)
                     if ok:
                         break
+        if (not ok) and profile.name == "dwg2dxf":
+            err_text = err or ""
+            if ("-Werror" in err_text) or ("format specifies type" in err_text):
+                retry_env = dict(env)
+                retry_env["CFLAGS"] = (retry_env.get("CFLAGS", "") + " -Wno-error -Wno-error=format -Wno-error=format-security").strip()
+                retry_env["CXXFLAGS"] = (retry_env.get("CXXFLAGS", "") + " -Wno-error -Wno-error=format -Wno-error=format-security").strip()
+                retry_cmd = ["make", "-j1"]
+                print(f"[retry] dwg2dxf werror issue; retry with relaxed warnings: {' '.join(retry_cmd)}")
+                ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=retry_env)
+            if (not ok) and ("ld returned 1 exit status" in (err or "") or "linker command failed" in (err or "")):
+                retry_plan = [
+                    ["make", "-C", "programs", "dwg2dxf"],
+                    ["make", "dwg2dxf"],
+                ]
+                for retry_cmd in retry_plan:
+                    print(f"[retry] dwg2dxf link issue; trying focused target: {' '.join(retry_cmd)}")
+                    ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                    if ok:
+                        break
+            if not ok:
+                prebuilt = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+                if prebuilt:
+                    print(f"[warn] dwg2dxf build reported error but artifact exists ({len(prebuilt)}); continuing")
+                    ok = True
             if (
                 "pulled_options_state" in err_text
                 or "HMAC_Init_ex" in err_text
