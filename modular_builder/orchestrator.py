@@ -895,6 +895,32 @@ def _ensure_liblouis_dummy_brlcheck(repo_dir: Path, env: dict[str, str]) -> tupl
     return True, ""
 
 
+def _strip_werror_from_makefiles(repo_dir: Path) -> tuple[bool, str]:
+    changed_any = False
+    files: list[Path] = []
+    for p in repo_dir.rglob("Makefile"):
+        files.append(p)
+    for p in repo_dir.rglob("Makefile.in"):
+        files.append(p)
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return False, str(exc)
+        new = text.replace("-Werror=format-security", "")
+        new = new.replace("-Werror=format", "")
+        new = new.replace("-Werror", "")
+        if new != text:
+            try:
+                path.write_text(new, encoding="utf-8")
+                changed_any = True
+            except OSError as exc:
+                return False, str(exc)
+    if changed_any:
+        print("[build-fix] stripped -Werror from Makefile(s)")
+    return True, ""
+
+
 def _render_tokens(tokens: list[str], variant: BuildVariant) -> list[str]:
     rendered: list[str] = []
     for token in tokens:
@@ -1249,9 +1275,13 @@ def _build_once(
             jobs = max(1, os.cpu_count() or 1)
             if profile.name == "openssl" and variant.compiler == "clang":
                 jobs = 1
+            if profile.name == "dwg2dxf":
+                jobs = 1
             build_cmd.append(f"-j{jobs}")
         if build_cmd and build_cmd[0] == "make" and not any(t.startswith("-j") for t in build_cmd[1:]):
             jobs = 1 if (profile.name == "openssl" and variant.compiler == "clang") else max(1, os.cpu_count() or 1)
+            if profile.name == "dwg2dxf":
+                jobs = 1
             build_cmd.append(f"-j{jobs}")
         if build_cmd:
             ok, err = run_cmd(build_cmd, cwd=profile.repo_dir, env=env)
@@ -1462,7 +1492,16 @@ def _build_once(
                         break
         if (not ok) and profile.name == "dwg2dxf":
             err_text = err or ""
+            if "are the same file" in err_text:
+                retry_cmd = ["make", "-j1"]
+                print(f"[retry] dwg2dxf race on generated headers; retry single-thread: {' '.join(retry_cmd)}")
+                ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                err_text = err or ""
             if ("-Werror" in err_text) or ("format specifies type" in err_text):
+                strip_ok, strip_err = _strip_werror_from_makefiles(profile.repo_dir)
+                if not strip_ok:
+                    err = strip_err or err
+                    err_text = err or ""
                 retry_env = dict(env)
                 retry_env["CFLAGS"] = (retry_env.get("CFLAGS", "") + " -Wno-error -Wno-error=format -Wno-error=format-security").strip()
                 retry_env["CXXFLAGS"] = (retry_env.get("CXXFLAGS", "") + " -Wno-error -Wno-error=format -Wno-error=format-security").strip()
