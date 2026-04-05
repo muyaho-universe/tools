@@ -4,7 +4,7 @@ import subprocess
 
 # 기본 경로 및 명령어 설정
 OPENSSL_DIR = "/home/user/openssl"
-CLANG_BIN = "/home/user/BinForge/tools/clang/clang-14.0.6/bin/clang"
+CLANG_BIN = "/home/user/BinForge/tools/clang/clang-13.0.1/bin/clang"
 CSV_FILE = "openssl_our.csv"
 
 # 아주 긴 Clang 컴파일 옵션 (동적으로 주입할 최적화 옵션 -O0 / -O3 는 여기서 제외)
