@@ -145,7 +145,7 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
     configure_missing = bool(profile.configure_cmd) and profile.configure_cmd[0] == "./configure" and not configure_path.exists()
     if configure_missing:
         autogen = profile.repo_dir / "autogen.sh"
-        if autogen.exists():
+        if autogen.exists() and profile.name not in {"freetype", "libtiff"}:
             ok, err = run_cmd(["sh", "./autogen.sh"], cwd=profile.repo_dir, env=env)
             if not ok:
                 return False, err
