@@ -88,8 +88,11 @@ def release_tags_in_range(repo_dir: Path, start: str, end: str) -> List[str]:
     if res.returncode != 0:
         return []
 
-    start_key = version_key(start)
-    end_key = version_key(end)
+    # Bounds in CSV may include prefixes such as VER-/v.
+    start_norm = extract_version_from_tag(start) or normalize_version(start)
+    end_norm = extract_version_from_tag(end) or normalize_version(end)
+    start_key = version_key(start_norm)
+    end_key = version_key(end_norm)
     picked: Dict[str, str] = {}
     for tag in [x.strip() for x in res.stdout.splitlines() if x.strip()]:
         if is_prerelease(tag):
@@ -140,6 +143,7 @@ def main() -> int:
 
     expected_commit: Dict[str, Set[str]] = defaultdict(set)
     expected_release: Dict[str, Set[Tuple[str, str, str, str]]] = defaultdict(set)
+    release_warnings: List[str] = []
 
     for row in rows:
         project = (row.get("Project") or "").strip()
@@ -160,7 +164,16 @@ def main() -> int:
         patch_end = (row.get("Patch end") or "").strip()
         if bug_start and patch_end and args.scope in {"all", "releases"}:
             repo = Path(PROJECT_REPOS.get(project, ""))
+            if not repo.exists():
+                release_warnings.append(
+                    f"{project} :: release expectation skipped (repo missing): {repo}"
+                )
+                continue
             versions = release_tags_in_range(repo, bug_start, patch_end)
+            if not versions:
+                release_warnings.append(
+                    f"{project} :: no tags matched release range: {bug_start}..{patch_end}"
+                )
             for ver in versions:
                 for comp, opt in release_variants_for_project(project):
                     expected_release[project].add((project, ver, opt, comp))
@@ -191,6 +204,9 @@ def main() -> int:
                 missing_lines.append(f"{project} :: missing release output :: *{suffix}")
 
     print(f"[summary] output_root={out_root}")
+    if release_warnings:
+        for line in sorted(set(release_warnings)):
+            print(f"[warn] {line}")
     print(f"[summary] expected={total_expected} missing={total_missing} present={total_expected - total_missing}")
     if total_missing == 0:
         print("[result] PASS: expected outputs are present")
