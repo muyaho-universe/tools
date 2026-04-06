@@ -1030,14 +1030,18 @@ def _find_pcf2bdf_source(repo_dir: Path) -> Path | None:
 
 
 def _pick_existing_cpp_compiler(preferred: str) -> str:
+    def _looks_like_cpp_driver(cmd: str) -> bool:
+        name = os.path.basename(cmd).lower()
+        return name.endswith("++") or ("g++" in name) or ("clang++" in name) or (name == "c++")
+
     cand = (preferred or "").strip()
     if cand:
         if os.path.isabs(cand):
-            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK) and _looks_like_cpp_driver(cand):
                 return cand
         else:
             resolved = shutil.which(cand)
-            if resolved:
+            if resolved and _looks_like_cpp_driver(resolved):
                 return resolved
     for alt in ["clang++", "g++", "c++"]:
         resolved = shutil.which(alt)
@@ -1476,6 +1480,10 @@ def _build_once(
                     retry_cmd = [cxx, *cxxflags, str(src_rel), "-o", "pcf2bdf"]
                     print(f"[retry] pcf2bdf C++ link issue; forcing CXX link: {' '.join(retry_cmd)}")
                     ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                    if not ok:
+                        retry_cmd = [cxx, *cxxflags, str(src_rel), "-o", "pcf2bdf", "-lstdc++", "-lm"]
+                        print(f"[retry] pcf2bdf C++ link issue; retry explicit stdlib: {' '.join(retry_cmd)}")
+                        ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name == "exiv2":
             err_text = err or ""
             if (
