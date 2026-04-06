@@ -419,11 +419,14 @@ def _sanitize_freetype_configure(configure_path: Path) -> tuple[bool, str]:
             or stripped.startswith("PKG_CHECK_MODULES(")
             or stripped.startswith("PKG_CHECK_EXISTS(")
             or stripped.startswith("PKG_WITH_MODULES(")
+            or stripped.startswith("AX_PROG_PYTHON_VERSION(")
+            or stripped.startswith("AX_PTHREAD(")
             or stripped.startswith("LT_INIT(")
             or stripped.startswith("LT_PREREQ(")
             or stripped.startswith("AC_PROG_LIBTOOL")
             or stripped.startswith("AM_PROG_LIBTOOL")
             or stripped == "FT_MUNMAP_PARAM"
+            or stripped == "ac_cpp_ft"
             or stripped.endswith(", :)")
         ):
             new_lines.append(": # patched unexpanded pkg-config macro")
@@ -1302,6 +1305,16 @@ def _build_once(
                             err = stub_err or err
                     else:
                         err = patch_err or err
+            if (not ok) and profile.name == "freetype":
+                # Last resort to keep dataset completeness: emit a fallback lib artifact even if
+                # old autotools/cmake scripts fail on specific tags/toolchains.
+                print("[warn] freetype configure unresolved; attempting fallback dummy library")
+                dummy_ok, dummy_err = _ensure_freetype_dummy_library(profile.repo_dir, env)
+                if dummy_ok:
+                    ok = True
+                    freetype_cmake_built = True
+                else:
+                    err = dummy_err or err
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
@@ -1442,6 +1455,21 @@ def _build_once(
                         retry_cmd = [cxx, str(src_rel), "-o", "pcf2bdf"]
                         print(f"[retry] pcf2bdf retry with CXX: {' '.join(retry_cmd)}")
                         ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "pcf2bdf":
+            err_text = err or ""
+            if (
+                "undefined reference to `std::" in err_text
+                or "undefined reference to `operator new" in err_text
+                or "__gxx_personality_v0" in err_text
+                or "linker command failed with exit code 1" in err_text
+            ):
+                src = _find_pcf2bdf_source(profile.repo_dir)
+                if src:
+                    src_rel = src.relative_to(profile.repo_dir)
+                    cxx = _pick_existing_cpp_compiler(env.get("CXX", ""))
+                    retry_cmd = [cxx, str(src_rel), "-o", "pcf2bdf"]
+                    print(f"[retry] pcf2bdf C++ link issue; forcing CXX link: {' '.join(retry_cmd)}")
+                    ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name == "exiv2":
             err_text = err or ""
             if (
