@@ -41,7 +41,7 @@ def parse_commit_hash(raw: str) -> str:
 
 def git_show(repo_dir: Path, commit_hash: str) -> tuple[bool, str]:
     res = subprocess.run(
-        ["git", "show", "--no-color", commit_hash],
+        ["git", "show", "--no-color", "--format=", commit_hash],
         cwd=str(repo_dir),
         capture_output=True,
         text=True,
@@ -125,4 +125,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
