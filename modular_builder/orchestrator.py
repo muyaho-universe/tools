@@ -1026,6 +1026,23 @@ def _find_pcf2bdf_source(repo_dir: Path) -> Path | None:
     return None
 
 
+def _pick_existing_cpp_compiler(preferred: str) -> str:
+    cand = (preferred or "").strip()
+    if cand:
+        if os.path.isabs(cand):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+        else:
+            resolved = shutil.which(cand)
+            if resolved:
+                return resolved
+    for alt in ["clang++", "g++", "c++"]:
+        resolved = shutil.which(alt)
+        if resolved:
+            return resolved
+    return cand or "c++"
+
+
 def _debug_artifact_candidates(profile: BuildProfile, variant: BuildVariant) -> None:
     print(f"[artifact-debug] project={profile.name} variant={variant.key}")
     sample_patterns = ["**/*.so*", "**/*.a", "**/openssl", "**/tcpdump", "**/openvpn", "**/exiv2"]
@@ -1425,6 +1442,40 @@ def _build_once(
                         retry_cmd = [cxx, str(src_rel), "-o", "pcf2bdf"]
                         print(f"[retry] pcf2bdf retry with CXX: {' '.join(retry_cmd)}")
                         ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "exiv2":
+            err_text = err or ""
+            if (
+                "undefined reference to `std::" in err_text
+                or "__gxx_personality_v0" in err_text
+                or "linker command failed with exit code 1" in err_text
+            ):
+                # Some exiv2 tags can end up linking C++ targets with clang (C driver).
+                # Reconfigure explicitly with a valid C++ compiler and retry.
+                cmake_build = f"build_{variant.compiler}_{variant.opt}"
+                retry_env = dict(env)
+                retry_env["CXX"] = _pick_existing_cpp_compiler(retry_env.get("CXX", ""))
+                forced_cfg = [
+                    "cmake",
+                    "-S",
+                    ".",
+                    "-B",
+                    cmake_build,
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DEXIV2_ENABLE_XMP=OFF",
+                    f"-DCMAKE_C_COMPILER={retry_env.get('CC', 'cc')}",
+                    f"-DCMAKE_CXX_COMPILER={retry_env['CXX']}",
+                    "-DCMAKE_CXX_STANDARD=11",
+                    "-DCMAKE_CXX_STANDARD_REQUIRED=ON",
+                    "-DCMAKE_SHARED_LINKER_FLAGS=-lstdc++ -lm",
+                    "-DCMAKE_EXE_LINKER_FLAGS=-lstdc++ -lm",
+                ]
+                print(f"[retry] exiv2 C++ link issue; forcing CXX toolchain: {' '.join(forced_cfg)}")
+                ok, cfg_err = run_cmd(forced_cfg, cwd=profile.repo_dir, env=retry_env)
+                if ok:
+                    retry_build = ["cmake", "--build", cmake_build, "-j", str(max(1, os.cpu_count() or 1))]
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=retry_env)
+                else:
+                    err = cfg_err or err
         if (not ok) and profile.name == "freetype":
             err_text = err or ""
             if "bzlib.h" in err_text or "ftbzip2.c" in err_text:
