@@ -1087,6 +1087,11 @@ def _build_once(
     env = os.environ.copy()
     env.update(profile.env_overrides)
     env.update(variant.env_overrides)
+    if profile.name == "pcf2bdf":
+        # pcf2bdf is C++; some legacy makefiles link via $(CC), which breaks clang variants.
+        cpp = _pick_existing_cpp_compiler(env.get("CXX", ""))
+        env["CXX"] = cpp
+        env["CC"] = cpp
     if profile.name == "freetype":
         cpp = env.get("CPPFLAGS", "").strip()
         env["CPPFLAGS"] = (
@@ -1467,7 +1472,8 @@ def _build_once(
                 if src:
                     src_rel = src.relative_to(profile.repo_dir)
                     cxx = _pick_existing_cpp_compiler(env.get("CXX", ""))
-                    retry_cmd = [cxx, str(src_rel), "-o", "pcf2bdf"]
+                    cxxflags = [t for t in (env.get("CXXFLAGS", "") or "").split() if t]
+                    retry_cmd = [cxx, *cxxflags, str(src_rel), "-o", "pcf2bdf"]
                     print(f"[retry] pcf2bdf C++ link issue; forcing CXX link: {' '.join(retry_cmd)}")
                     ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name == "exiv2":
