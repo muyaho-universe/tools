@@ -76,8 +76,12 @@ def release_tags_in_range(repo_dir: Path, start: str, end: str) -> list[TagVersi
         raise RuntimeError((tags_result.stderr or "failed to list tags").strip())
     tags_text = tags_result.stdout
 
-    start_key = version_key(start)
-    end_key = version_key(end)
+    # CSV bounds can be values like "VER-2-6-3" or "v0.27.7".
+    # Canonicalize to numeric version text first so tuple ordering remains stable.
+    start_norm = extract_version_from_tag(start) or _normalize_text(start)
+    end_norm = extract_version_from_tag(end) or _normalize_text(end)
+    start_key = version_key(start_norm)
+    end_key = version_key(end_norm)
     candidates: dict[str, TagVersion] = {}
 
     for tag in [line.strip() for line in tags_text.splitlines() if line.strip()]:
