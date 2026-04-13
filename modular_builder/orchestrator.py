@@ -1120,8 +1120,8 @@ def _build_once(
 
         if profile.configure_cmd:
             if openssl_safe_mode:
-                # Old OpenSSL release tags are fragile with shared+asm across toolchains.
-                configure_cmd = ["perl", "Configure", "linux-x86_64", "no-shared", "no-asm"]
+                # Keep shared libraries enabled (.so) while still avoiding fragile asm paths.
+                configure_cmd = ["perl", "Configure", "linux-x86_64", "shared", "no-asm"]
             else:
                 configure_cmd = _render_tokens(profile.configure_cmd, variant)
             if profile.name == "freetype":
