@@ -24,6 +24,7 @@ class BuildContext:
     failures: list[str]
     built_cache: set[tuple[str, str, str]]
     parallel_workers: int
+    enable_pie: bool
     lock: Lock
 
 
@@ -1065,6 +1066,13 @@ def _debug_artifact_candidates(profile: BuildProfile, variant: BuildVariant) -> 
                 return
 
 
+def _append_flag(flags: str, flag: str) -> str:
+    tokens = flags.split()
+    if flag in tokens:
+        return flags.strip()
+    return f"{flags} {flag}".strip()
+
+
 def _build_once(
     profile: BuildProfile,
     row: BuildRow,
@@ -1091,6 +1099,16 @@ def _build_once(
     env = os.environ.copy()
     env.update(profile.env_overrides)
     env.update(variant.env_overrides)
+    if ctx.enable_pie:
+        builds_shared_libs = any(".so" in pattern for pattern in profile.artifact_globs)
+        if builds_shared_libs:
+            # Shared libraries should be built as PIC, not linked as PIE executables.
+            env["CFLAGS"] = _append_flag(env.get("CFLAGS", ""), "-fPIC")
+            env["CXXFLAGS"] = _append_flag(env.get("CXXFLAGS", ""), "-fPIC")
+        else:
+            env["CFLAGS"] = _append_flag(env.get("CFLAGS", ""), "-fPIE")
+            env["CXXFLAGS"] = _append_flag(env.get("CXXFLAGS", ""), "-fPIE")
+            env["LDFLAGS"] = _append_flag(env.get("LDFLAGS", ""), "-pie")
     if profile.name == "pcf2bdf":
         # pcf2bdf is C++; some legacy makefiles link via $(CC), which breaks clang variants.
         cpp = _pick_existing_cpp_compiler(env.get("CXX", ""))
@@ -1799,8 +1817,8 @@ def _release_variants() -> list[BuildVariant]:
                     env_overrides={
                         "CC": cc,
                         "CXX": cxx,
-                        "CFLAGS": f"-{opt}",
-                        "CXXFLAGS": f"-{opt}",
+                        "CFLAGS": f"-{opt} -g",
+                        "CXXFLAGS": f"-{opt} -g",
                         **extra,
                     },
                 )
@@ -1919,7 +1937,7 @@ def _process_releases(profile: BuildProfile, row: BuildRow, ctx: BuildContext) -
     )
 
     variants = _release_variants()
-    print(f"[release-variants] count={len(variants)} (gcc/clang x O0..O3, no -g)")
+    print(f"[release-variants] count={len(variants)} (gcc/clang x O0..O3, with -g)")
     tasks: list[tuple[str, str, BuildVariant]] = []
     for tag in tags:
         ref = tag.tag
@@ -1995,6 +2013,7 @@ def run_pipeline(
     mode: str = "all",
     clone_missing: bool = True,
     parallel_workers: int = 1,
+    enable_pie: bool = False,
 ) -> list[str]:
     profiles = build_profiles()
     resolved_output_root = Path(output_root).expanduser().resolve()
@@ -2003,6 +2022,7 @@ def run_pipeline(
         failures=[],
         built_cache=set(),
         parallel_workers=max(1, int(parallel_workers)),
+        enable_pie=enable_pie,
         lock=Lock(),
     )
     ctx.output_root.mkdir(parents=True, exist_ok=True)
