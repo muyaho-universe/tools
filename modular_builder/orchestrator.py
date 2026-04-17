@@ -24,6 +24,7 @@ class BuildContext:
     failures: list[str]
     built_cache: set[tuple[str, str, str]]
     parallel_workers: int
+    project_workers: int
     enable_pie: bool
     lock: Lock
 
@@ -55,7 +56,8 @@ def _log_failure(ctx: BuildContext, row: BuildRow, ref_kind: str, step: str, err
     msg = f"{row.project},{row.cve},{ref_kind},{step} fail"
     if one_line:
         msg = f"{msg} | {one_line}"
-    ctx.failures.append(msg)
+    with ctx.lock:
+        ctx.failures.append(msg)
 
 
 def _checkout_ref(profile: BuildProfile, ref: str) -> tuple[bool, str]:
@@ -2006,6 +2008,39 @@ def _build_once_isolated_worktree(
             shutil.rmtree(wt_dir, ignore_errors=True)
 
 
+def _process_project_rows(
+    project: str,
+    rows: list[BuildRow],
+    profiles: dict[str, BuildProfile],
+    ctx: BuildContext,
+    mode: str,
+    clone_missing: bool,
+) -> None:
+    profile = profiles.get(project)
+    if not profile:
+        for row in rows:
+            _log_failure(ctx, row, "profile", "resolve", "unsupported project profile")
+        return
+
+    if not profile.repo_dir.exists():
+        if not clone_missing:
+            for row in rows:
+                _log_failure(ctx, row, "profile", "repo_dir", f"repo path not found: {profile.repo_dir}")
+            return
+        ok, err = _ensure_repo(profile)
+        if not ok:
+            for row in rows:
+                _log_failure(ctx, row, "profile", "clone", err)
+            return
+
+    for row in rows:
+        print(f"\n[row] project={row.project} cve={row.cve} file={row.file}")
+        if mode in {"all", "commits"}:
+            _process_commits(profile, row, ctx)
+        if mode in {"all", "releases"}:
+            _process_releases(profile, row, ctx)
+
+
 def run_pipeline(
     csv_path: str,
     output_root: str,
@@ -2013,6 +2048,7 @@ def run_pipeline(
     mode: str = "all",
     clone_missing: bool = True,
     parallel_workers: int = 1,
+    project_workers: int = 1,
     enable_pie: bool = False,
 ) -> list[str]:
     profiles = build_profiles()
@@ -2022,11 +2058,13 @@ def run_pipeline(
         failures=[],
         built_cache=set(),
         parallel_workers=max(1, int(parallel_workers)),
+        project_workers=max(1, int(project_workers)),
         enable_pie=enable_pie,
         lock=Lock(),
     )
     ctx.output_root.mkdir(parents=True, exist_ok=True)
 
+    grouped_rows: dict[str, list[BuildRow]] = {}
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for raw in reader:
@@ -2035,24 +2073,22 @@ def run_pipeline(
                 continue
             if only_project and row.project != only_project:
                 continue
-            print(f"\n[row] project={row.project} cve={row.cve} file={row.file}")
+            grouped_rows.setdefault(row.project, []).append(row)
 
-            profile = profiles.get(row.project)
-            if not profile:
-                _log_failure(ctx, row, "profile", "resolve", "unsupported project profile")
-                continue
-            if not profile.repo_dir.exists():
-                if not clone_missing:
-                    _log_failure(ctx, row, "profile", "repo_dir", f"repo path not found: {profile.repo_dir}")
-                    continue
-                ok, err = _ensure_repo(profile)
-                if not ok:
-                    _log_failure(ctx, row, "profile", "clone", err)
-                    continue
+    if not grouped_rows:
+        return ctx.failures
 
-            if mode in {"all", "commits"}:
-                _process_commits(profile, row, ctx)
-            if mode in {"all", "releases"}:
-                _process_releases(profile, row, ctx)
+    if ctx.project_workers <= 1 or len(grouped_rows) <= 1:
+        for project, rows in grouped_rows.items():
+            _process_project_rows(project, rows, profiles, ctx, mode, clone_missing)
+        return ctx.failures
+
+    with ThreadPoolExecutor(max_workers=ctx.project_workers) as ex:
+        futures = [
+            ex.submit(_process_project_rows, project, rows, profiles, ctx, mode, clone_missing)
+            for project, rows in grouped_rows.items()
+        ]
+        for fut in as_completed(futures):
+            fut.result()
 
     return ctx.failures
