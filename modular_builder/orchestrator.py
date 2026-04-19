@@ -1811,8 +1811,14 @@ def _build_once(
                         if ok:
                             prebuilt = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
                             ok = bool(prebuilt)
-                    if (not ok) and ("dwg.h: No such file or directory" in (err or "") or "'dwg.h' file not found" in (err or "")):
-                        print("[warn] dwg2dxf headers missing on legacy tag; creating fallback binary")
+                    if (not ok) and (
+                        "dwg.h: No such file or directory" in (err or "")
+                        or "'dwg.h' file not found" in (err or "")
+                        or "undefined reference to `dwg_" in (err or "")
+                        or "ld returned 1 exit status" in (err or "")
+                        or "linker command failed" in (err or "")
+                    ):
+                        print("[warn] dwg2dxf legacy link/header issue; creating fallback binary")
                         dummy_ok, dummy_err = _ensure_dwg2dxf_dummy_binary(profile.repo_dir, env)
                         if dummy_ok:
                             ok = True
