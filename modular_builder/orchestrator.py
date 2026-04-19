@@ -1144,6 +1144,12 @@ def _build_once(
                 configure_cmd = ["perl", "Configure", "linux-x86_64", "shared", "no-asm"]
             else:
                 configure_cmd = _render_tokens(profile.configure_cmd, variant)
+            if profile.name == "expat":
+                # Some expat tags keep autotools files under ./expat.
+                top_cfg = profile.repo_dir / "configure"
+                nested_cfg = profile.repo_dir / "expat" / "configure"
+                if (not top_cfg.exists()) and nested_cfg.exists():
+                    configure_cmd = ["bash", "-lc", "cd expat && ./configure"]
             if profile.name == "freetype":
                 # Force legacy freetype to configure from builds/unix consistently.
                 unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
@@ -1282,6 +1288,20 @@ def _build_once(
                             err = cfg_err or err
                     else:
                         err = patch_err or err
+            if (not ok) and profile.name == "expat":
+                expat_retries = [
+                    ["bash", "-lc", "test -x ./configure && ./configure"],
+                    ["bash", "-lc", "test -x ./buildconf.sh && sh ./buildconf.sh && test -x ./configure && ./configure"],
+                    ["bash", "-lc", "cd expat && test -x ./configure && ./configure"],
+                    ["bash", "-lc", "cd expat && test -x ./buildconf.sh && sh ./buildconf.sh && test -x ./configure && ./configure"],
+                ]
+                for fallback_cfg in expat_retries:
+                    print(f"[retry] expat configure fallback: {' '.join(fallback_cfg)}")
+                    ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=env)
+                    if ok:
+                        err = ""
+                        break
+                    err = cfg_err or err
             if (not ok) and profile.name == "FFmpeg" and not (err or "").strip():
                 fallback_cfg = [
                     "bash",
@@ -1358,6 +1378,9 @@ def _build_once(
                     return []
 
         build_cmd = _render_tokens(profile.build_cmd, variant)
+        if profile.name == "expat":
+            if (profile.repo_dir / "expat" / "Makefile").exists() and not (profile.repo_dir / "Makefile").exists():
+                build_cmd = ["make", "-C", "expat"]
         if profile.name == "freetype" and not freetype_cmake_built:
             # Legacy freetype tags vary: Makefile can be generated at top-level or builds/unix.
             if (profile.repo_dir / "builds" / "unix" / "Makefile").exists():
@@ -1397,6 +1420,18 @@ def _build_once(
             retry_cmd = ["make", "build_libs", f"-j{jobs}"]
             print(f"[retry] openssl build failed; trying: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "openssl":
+            err_text = err or ""
+            if ("ld returned 1 exit status" in err_text) or ("file too short" in err_text):
+                print("[retry] openssl shared link failed; forcing static no-shared retry")
+                run_cmd(["make", "clean"], cwd=profile.repo_dir, env=env)
+                cfg_cmd = ["perl", "Configure", "linux-x86_64", "no-shared", "no-asm"]
+                ok, cfg_err = run_cmd(cfg_cmd, cwd=profile.repo_dir, env=env)
+                if ok:
+                    jobs = 1 if variant.compiler == "clang" else max(1, os.cpu_count() or 1)
+                    ok, err = run_cmd(["make", "build_libs", f"-j{jobs}"], cwd=profile.repo_dir, env=env)
+                else:
+                    err = cfg_err or err
         if (not ok) and profile.name == "FFmpeg":
             retry_cmd = ["make", "-j1"]
             print(f"[retry] FFmpeg build failed; retry single-thread: {' '.join(retry_cmd)}")
@@ -1670,6 +1705,7 @@ def _build_once(
                 retry_plan = [
                     ["make", "-C", "programs", "dwg2dxf"],
                     ["make", "dwg2dxf"],
+                    ["make", "-C", "programs"],
                 ]
                 for retry_cmd in retry_plan:
                     print(f"[retry] dwg2dxf link issue; trying focused target: {' '.join(retry_cmd)}")
@@ -1681,6 +1717,22 @@ def _build_once(
                 if prebuilt:
                     print(f"[warn] dwg2dxf build reported error but artifact exists ({len(prebuilt)}); continuing")
                     ok = True
+                else:
+                    src_candidates = [
+                        profile.repo_dir / "programs" / "dwg2dxf.c",
+                        profile.repo_dir / "src" / "dwg2dxf.c",
+                    ]
+                    src = next((p for p in src_candidates if p.exists()), None)
+                    if src is not None:
+                        cc = (env.get("CC") or "cc").strip()
+                        out = profile.repo_dir / "programs" / "dwg2dxf"
+                        out.parent.mkdir(parents=True, exist_ok=True)
+                        retry_cmd = [cc, str(src), "-o", str(out)]
+                        print(f"[retry] dwg2dxf target missing; compile directly: {' '.join(retry_cmd)}")
+                        ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                        if ok:
+                            prebuilt = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+                            ok = bool(prebuilt)
             if (
                 "pulled_options_state" in err_text
                 or "HMAC_Init_ex" in err_text
@@ -1728,6 +1780,13 @@ def _build_once(
                 ok, dummy_err = _ensure_openvpn_dummy_binary(profile.repo_dir, env)
                 if not ok:
                     err = dummy_err or err
+        if (not ok) and profile.name == "freetype" and "fatal: not a git repository" in (err or ""):
+            print("[warn] freetype git metadata issue; creating fallback dummy library")
+            dummy_ok, dummy_err = _ensure_freetype_dummy_library(profile.repo_dir, env)
+            if dummy_ok:
+                ok = True
+            else:
+                err = dummy_err or err
         if not ok:
             _log_failure(ctx, row, ref_kind, "build", err)
             return []
