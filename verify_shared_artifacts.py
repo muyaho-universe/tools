@@ -7,10 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-FALLBACK_TOKENS = (
-    "fallback",
-    "dummy",
-    "_dummy_",
+FALLBACK_SYMBOL_TOKENS = (
     "freetype_dummy_symbol",
     "expat_dummy_symbol",
     "__binforge_liblouis_brlcheck_dummy",
@@ -43,17 +40,18 @@ def is_elf_shared(path: Path) -> bool:
 
 
 def has_dummy_marker(path: Path) -> bool:
-    # Fast path: textual scan
-    ok, text = run_capture(["strings", "-a", str(path)])
-    if ok:
-        low = text.lower()
-        if any(tok in low for tok in FALLBACK_TOKENS):
-            return True
-    # Symbol-level scan as backup
+    # Symbol-level scan only: avoids false positives from generic words
+    # like "dummy" or "fallback" appearing in legitimate binaries.
     ok, syms = run_capture(["nm", "-D", "--defined-only", str(path)])
     if ok:
         low = syms.lower()
-        if any(tok in low for tok in FALLBACK_TOKENS):
+        if any(tok in low for tok in FALLBACK_SYMBOL_TOKENS):
+            return True
+    # Fallback for stripped binaries where dynamic symbols may be absent.
+    ok, text = run_capture(["strings", "-a", str(path)])
+    if ok:
+        low = text.lower()
+        if any(tok in low for tok in FALLBACK_SYMBOL_TOKENS):
             return True
     return False
 
@@ -114,4 +112,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
