@@ -261,6 +261,22 @@ def _looks_like_autoconf_input(path: Path) -> bool:
     return "AC_INIT(" in head or "AC_PREREQ(" in head
 
 
+def _resolve_git_dir(repo_dir: Path) -> Path:
+    dot_git = repo_dir / ".git"
+    if dot_git.is_dir():
+        return dot_git
+    if dot_git.is_file():
+        try:
+            text = dot_git.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return dot_git
+        m = re.search(r"gitdir:\s*(.+)", text)
+        if m:
+            cand = (repo_dir / m.group(1).strip()).resolve()
+            return cand
+    return dot_git
+
+
 def _ensure_autotools_aux_files(base_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
     names = ["install-sh", "config.guess", "config.sub"]
     missing = [n for n in names if not (base_dir / n).exists()]
@@ -417,6 +433,10 @@ def _sanitize_freetype_configure(configure_path: Path) -> tuple[bool, str]:
     changed = False
     for line in text.splitlines():
         stripped = line.strip()
+        if 'have_librsvg="yes (pkg-config)", have_librsvg=no)' in stripped:
+            new_lines.append("have_librsvg=no # patched malformed librsvg check")
+            changed = True
+            continue
         if (
             stripped.startswith("PKG_PROG_PKG_CONFIG(")
             or stripped.startswith("PKG_CHECK_MODULES(")
@@ -1233,7 +1253,7 @@ def _build_once(
                                 "sed -i '/^[[:space:]]*PKG_WITH_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
                                 "sed -i '/^[[:space:]]*LT_INIT(/c\\: # patched unexpanded libtool macro' configure && "
                                 "sed -i '/^[[:space:]]*LT_PREREQ(/c\\: # patched unexpanded libtool macro' configure && "
-                                "chmod +x configure && ./configure",
+                                "chmod +x configure && ./configure --enable-shared --disable-static",
                             ]
                         else:
                             configure_cmd = []
@@ -1242,7 +1262,7 @@ def _build_once(
                         if not ok:
                             err = san_err
                             configure_cmd = []
-                        configure_cmd = ["bash", "-lc", "cd builds/unix && ./configure"]
+                        configure_cmd = ["bash", "-lc", "cd builds/unix && ./configure --enable-shared --disable-static"]
             if configure_cmd:
                 ok, err = run_cmd(
                     configure_cmd,
@@ -1258,7 +1278,7 @@ def _build_once(
                     "bash",
                     "-lc",
                     "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && "
-                    "bash ./configure",
+                    "bash ./configure --enable-shared --disable-static",
                 ]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
                 unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
@@ -1400,7 +1420,7 @@ def _build_once(
                     if patch_ok:
                         stub_ok, stub_err = _ensure_freetype_png_stub(profile.repo_dir)
                         if stub_ok:
-                            retry_cfg = ["bash", "-lc", "cd builds/unix && ./configure"]
+                            retry_cfg = ["bash", "-lc", "cd builds/unix && ./configure --enable-shared --disable-static"]
                             print(f"[retry] freetype configure png issue; retry: {' '.join(retry_cfg)}")
                             ok, err = run_cmd(retry_cfg, cwd=profile.repo_dir, env=env)
                         else:
@@ -1732,6 +1752,17 @@ def _build_once(
                         ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
                 else:
                     err = setup_err or err
+        if (not ok) and profile.name == "freetype":
+            err_text = err or ""
+            if "fatal: not a git repository" in err_text:
+                retry_env = dict(env)
+                git_dir = _resolve_git_dir(profile.repo_dir)
+                retry_env["GIT_DIR"] = str(git_dir)
+                retry_env["GIT_WORK_TREE"] = str(profile.repo_dir)
+                print("[retry] freetype git context issue; retry build with explicit GIT_DIR/GIT_WORK_TREE")
+                ok, err = run_cmd(build_cmd, cwd=profile.repo_dir, env=retry_env)
+                if ok:
+                    env.update(retry_env)
         if (not ok) and profile.name == "openvpn":
             err_text = err or ""
             if "lzo enabled but missing" in err_text:
@@ -1896,6 +1927,7 @@ def _build_once(
             recover_plan = [
                 ["make", "-C", "builds/unix", f"-j{jobs}"],
                 ["make", "-C", "builds/unix", "all", f"-j{jobs}"],
+                ["make", "-C", "builds/unix", "install", f"-j{jobs}"],
                 ["make", f"-j{jobs}"],
                 ["make", "all", f"-j{jobs}"],
             ]
