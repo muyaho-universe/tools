@@ -1141,6 +1141,10 @@ def _build_once(
             return [p for p in cache_dir.iterdir() if p.is_file()]
 
     env = os.environ.copy()
+    # Prevent caller-shell git overrides from breaking detached worktree builds.
+    env.pop("GIT_DIR", None)
+    env.pop("GIT_WORK_TREE", None)
+    env.pop("GIT_INDEX_FILE", None)
     env.update(profile.env_overrides)
     env.update(variant.env_overrides)
     if ctx.enable_pie:
@@ -1407,6 +1411,19 @@ def _build_once(
                 # Last resort to keep dataset completeness: emit a fallback lib artifact even if
                 # old autotools/cmake scripts fail on specific tags/toolchains.
                 print("[warn] freetype configure unresolved; real-build-only mode keeps this as failure")
+            if (not ok) and profile.name == "freetype":
+                err_text = err or ""
+                if "collect2: error: ld returned 1 exit status" in err_text or "ld returned 1 exit status" in err_text:
+                    # Some tags fail configure link checks under PIE-default toolchains.
+                    retry_env = dict(env)
+                    retry_env["CFLAGS"] = _append_flag(_append_flag(retry_env.get("CFLAGS", ""), "-fno-PIE"), "-fPIC")
+                    retry_env["CXXFLAGS"] = _append_flag(_append_flag(retry_env.get("CXXFLAGS", ""), "-fno-PIE"), "-fPIC")
+                    retry_env["LDFLAGS"] = _append_flag(retry_env.get("LDFLAGS", ""), "-no-pie")
+                    retry_cfg = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && bash ./configure"]
+                    print(f"[retry] freetype configure link issue; trying no-pie configure: {' '.join(retry_cfg)}")
+                    ok, err = run_cmd(retry_cfg, cwd=profile.repo_dir, env=retry_env)
+                    if ok:
+                        env.update(retry_env)
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
@@ -1874,6 +1891,25 @@ def _build_once(
             return []
 
         artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+        if (not artifacts) and profile.name == "freetype":
+            jobs = max(1, os.cpu_count() or 1)
+            recover_plan = [
+                ["make", "-C", "builds/unix", f"-j{jobs}"],
+                ["make", "-C", "builds/unix", "all", f"-j{jobs}"],
+                ["make", f"-j{jobs}"],
+                ["make", "all", f"-j{jobs}"],
+            ]
+            for retry_cmd in recover_plan:
+                print(f"[retry] freetype artifacts missing; trying extra build: {' '.join(retry_cmd)}")
+                run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+                if artifacts:
+                    break
+            if (not artifacts) and (profile.repo_dir / "build_freetype_fallback").exists():
+                retry_cmd = ["cmake", "--build", "build_freetype_fallback", "-j", str(jobs)]
+                print(f"[retry] freetype artifacts missing; retry cmake fallback build: {' '.join(retry_cmd)}")
+                run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
         if not artifacts:
             _debug_artifact_candidates(profile, variant)
             _log_failure(ctx, row, ref_kind, "artifact", err or "artifact not found")
