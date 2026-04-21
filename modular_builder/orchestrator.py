@@ -1144,15 +1144,22 @@ def _build_once(
     env.update(profile.env_overrides)
     env.update(variant.env_overrides)
     if ctx.enable_pie:
-        builds_shared_libs = any(".so" in pattern for pattern in profile.artifact_globs)
-        if builds_shared_libs:
-            # Shared libraries should be built as PIC, not linked as PIE executables.
-            env["CFLAGS"] = _append_flag(env.get("CFLAGS", ""), "-fPIC")
-            env["CXXFLAGS"] = _append_flag(env.get("CXXFLAGS", ""), "-fPIC")
+        if profile.name == "dwg2dxf":
+            # Legacy dwg2dxf tags (e.g., 0.5) frequently fail PIE linking due to non-PIE objects.
+            # Keep global PIE mode on for other projects, but force no-PIE for this project.
+            env["CFLAGS"] = _append_flag(env.get("CFLAGS", ""), "-fno-pie")
+            env["CXXFLAGS"] = _append_flag(env.get("CXXFLAGS", ""), "-fno-pie")
+            env["LDFLAGS"] = _append_flag(env.get("LDFLAGS", ""), "-no-pie")
         else:
-            env["CFLAGS"] = _append_flag(env.get("CFLAGS", ""), "-fPIE")
-            env["CXXFLAGS"] = _append_flag(env.get("CXXFLAGS", ""), "-fPIE")
-            env["LDFLAGS"] = _append_flag(env.get("LDFLAGS", ""), "-pie")
+            builds_shared_libs = any(".so" in pattern for pattern in profile.artifact_globs)
+            if builds_shared_libs:
+                # Shared libraries should be built as PIC, not linked as PIE executables.
+                env["CFLAGS"] = _append_flag(env.get("CFLAGS", ""), "-fPIC")
+                env["CXXFLAGS"] = _append_flag(env.get("CXXFLAGS", ""), "-fPIC")
+            else:
+                env["CFLAGS"] = _append_flag(env.get("CFLAGS", ""), "-fPIE")
+                env["CXXFLAGS"] = _append_flag(env.get("CXXFLAGS", ""), "-fPIE")
+                env["LDFLAGS"] = _append_flag(env.get("LDFLAGS", ""), "-pie")
     if profile.name == "pcf2bdf":
         # pcf2bdf is C++; some legacy makefiles link via $(CC), which breaks clang variants.
         cpp = _pick_existing_cpp_compiler(env.get("CXX", ""))
@@ -1399,13 +1406,7 @@ def _build_once(
             if (not ok) and profile.name == "freetype":
                 # Last resort to keep dataset completeness: emit a fallback lib artifact even if
                 # old autotools/cmake scripts fail on specific tags/toolchains.
-                print("[warn] freetype configure unresolved; attempting fallback dummy library")
-                dummy_ok, dummy_err = _ensure_freetype_dummy_library(profile.repo_dir, env)
-                if dummy_ok:
-                    ok = True
-                    freetype_cmake_built = True
-                else:
-                    err = dummy_err or err
+                print("[warn] freetype configure unresolved; real-build-only mode keeps this as failure")
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
@@ -1818,12 +1819,7 @@ def _build_once(
                         or "ld returned 1 exit status" in (err or "")
                         or "linker command failed" in (err or "")
                     ):
-                        print("[warn] dwg2dxf legacy link/header issue; creating fallback binary")
-                        dummy_ok, dummy_err = _ensure_dwg2dxf_dummy_binary(profile.repo_dir, env)
-                        if dummy_ok:
-                            ok = True
-                        else:
-                            err = dummy_err or err
+                        print("[warn] dwg2dxf legacy link/header issue; real-build-only mode keeps this as failure")
             if (
                 "pulled_options_state" in err_text
                 or "HMAC_Init_ex" in err_text
@@ -1872,24 +1868,12 @@ def _build_once(
                 if not ok:
                     err = dummy_err or err
         if (not ok) and profile.name == "freetype" and "fatal: not a git repository" in (err or ""):
-            print("[warn] freetype git metadata issue; creating fallback dummy library")
-            dummy_ok, dummy_err = _ensure_freetype_dummy_library(profile.repo_dir, env)
-            if dummy_ok:
-                ok = True
-            else:
-                err = dummy_err or err
+            print("[warn] freetype git metadata issue; real-build-only mode keeps this as failure")
         if not ok:
             _log_failure(ctx, row, ref_kind, "build", err)
             return []
 
         artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
-        if (not artifacts) and profile.name == "freetype":
-            print("[retry] freetype artifacts missing; creating fallback dummy library")
-            dummy_ok, dummy_err = _ensure_freetype_dummy_library(profile.repo_dir, env)
-            if dummy_ok:
-                artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
-            else:
-                err = dummy_err
         if not artifacts:
             _debug_artifact_candidates(profile, variant)
             _log_failure(ctx, row, ref_kind, "artifact", err or "artifact not found")
