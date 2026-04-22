@@ -103,6 +103,8 @@ def _freetype_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Pat
     real_patterns = [
         "**/libfreetype.so*",
         "**/libfreetype.a",
+        "**/freetype*.so*",
+        "**/freetype*.a",
     ]
     for pattern in real_patterns:
         for p in sorted(repo_dir.glob(pattern)):

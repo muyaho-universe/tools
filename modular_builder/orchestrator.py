@@ -476,6 +476,8 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
         return True, ""
 
     bootstrap_cmds = [
+        ["bash", "-lc", "cd builds/unix && (libtoolize --force --copy || glibtoolize --force --copy || true) && autoreconf -fi"],
+        ["bash", "-lc", "(libtoolize --force --copy || glibtoolize --force --copy || true) && autoreconf -fi"],
         ["bash", "-lc", "cd builds/unix && autoreconf -fi"],
         ["autoreconf", "-fi"],
     ]
@@ -502,14 +504,25 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
 
     wrapper_lines = [
         "#!/usr/bin/env sh",
+        'TAG=""',
+        'case " $* " in',
+        '  *" --tag="*) TAG="";;',
+        '  *) TAG="--tag=CC";;',
+        "esac",
         "if [ -x ./libtool ]; then",
-        '  exec ./libtool "$@"',
+        '  exec ./libtool $TAG "$@"',
         "fi",
         "if [ -x ../libtool ]; then",
-        '  exec ../libtool "$@"',
+        '  exec ../libtool $TAG "$@"',
         "fi",
         "if [ -x ../../libtool ]; then",
-        '  exec ../../libtool "$@"',
+        '  exec ../../libtool $TAG "$@"',
+        "fi",
+        "if [ -x /usr/bin/libtool ]; then",
+        '  exec /usr/bin/libtool $TAG "$@"',
+        "fi",
+        "if command -v libtool >/dev/null 2>&1; then",
+        '  exec libtool $TAG "$@"',
         "fi",
         'echo "freetype libtool script not found" >&2',
         "exit 127",
@@ -1149,6 +1162,8 @@ def _resolve_artifacts_for_variant(profile: BuildProfile, row: BuildRow, ref_kin
         loose_patterns = [
             "**/libfreetype.so*",
             "**/libfreetype.a",
+            "**/freetype*.so*",
+            "**/freetype*.a",
             "**/libfreetype.la",
             "**/freetype.lib",
         ]
@@ -1781,6 +1796,16 @@ def _build_once(
                     ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
                 else:
                     err = lt_err or err
+            err_text = err or ""
+            if "freetype libtool script not found" in err_text:
+                lt_ok, lt_err = _ensure_freetype_unix_libtool(profile.repo_dir, env)
+                tag_ok, tag_err = _patch_freetype_libtool_tag(profile.repo_dir)
+                if lt_ok and tag_ok:
+                    retry_build = list(build_cmd)
+                    print(f"[retry] freetype libtool wrapper issue; retry build: {' '.join(retry_build)}")
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                else:
+                    err = (lt_err or tag_err or err)
             err_text = err or ""
             if "libtool:   error: specify a tag with '--tag'" in err_text:
                 tag_ok, tag_err = _patch_freetype_libtool_tag(profile.repo_dir)
