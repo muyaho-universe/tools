@@ -518,12 +518,6 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
         "if [ -x ../../libtool ]; then",
         '  exec ../../libtool $TAG "$@"',
         "fi",
-        "if [ -x /usr/bin/libtool ]; then",
-        '  exec /usr/bin/libtool $TAG "$@"',
-        "fi",
-        "if command -v libtool >/dev/null 2>&1; then",
-        '  exec libtool $TAG "$@"',
-        "fi",
         'echo "freetype libtool script not found" >&2',
         "exit 127",
     ]
@@ -554,6 +548,9 @@ def _patch_freetype_libtool_tag(repo_dir: Path) -> tuple[bool, str]:
             return False, str(exc)
         new = re.sub(r"(\./builds/unix/libtool)\s+(--mode=)", r"\1 --tag=CC \2", text)
         new = re.sub(r"(\.\./builds/unix/libtool)\s+(--mode=)", r"\1 --tag=CC \2", new)
+        # Force system/bare libtool calls to use the repository-local script.
+        new = re.sub(r"(?<![\w./-])/usr/bin/libtool\s+(--mode=)", r"./builds/unix/libtool --tag=CC \1", new)
+        new = re.sub(r"(^|\s)libtool\s+(--mode=)", r"\1./builds/unix/libtool --tag=CC \2", new)
         if new != text:
             try:
                 mk.write_text(new, encoding="utf-8")
@@ -1297,6 +1294,12 @@ def _build_once(
             f"-I{profile.repo_dir} -I{profile.repo_dir / 'include'} "
             f"-I{profile.repo_dir / 'src' / 'sfnt'} {cpp}"
         ).strip()
+        env["CFLAGS"] = (
+            env.get("CFLAGS", "") + " -Wno-error -Wno-cpp -Wno-error=cpp"
+        ).strip()
+        env["CXXFLAGS"] = (
+            env.get("CXXFLAGS", "") + " -Wno-error -Wno-cpp -Wno-error=cpp"
+        ).strip()
     openssl_safe_mode = profile.name == "openssl"
     freetype_cmake_built = False
 
@@ -1815,6 +1818,15 @@ def _build_once(
                     ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
                 else:
                     err = tag_err or err
+            err_text = err or ""
+            if "/usr/bin/libtool: line 1920: @RC@: command not found" in err_text or "@RC@: command not found" in err_text:
+                patch_ok, patch_err = _patch_freetype_libtool_tag(profile.repo_dir)
+                if patch_ok:
+                    retry_build = list(build_cmd)
+                    print(f"[retry] freetype system libtool issue; retry build with local libtool: {' '.join(retry_build)}")
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                else:
+                    err = patch_err or err
             err_text = err or ""
             if "bzlib.h" in err_text or "ftbzip2.c" in err_text:
                 patch_ok, patch_err = _patch_freetype_bzip2_sources(profile.repo_dir)
