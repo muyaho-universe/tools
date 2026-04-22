@@ -444,10 +444,6 @@ def _sanitize_freetype_configure(configure_path: Path) -> tuple[bool, str]:
             or stripped.startswith("PKG_WITH_MODULES(")
             or stripped.startswith("AX_PROG_PYTHON_VERSION(")
             or stripped.startswith("AX_PTHREAD(")
-            or stripped.startswith("LT_INIT(")
-            or stripped.startswith("LT_PREREQ(")
-            or stripped.startswith("AC_PROG_LIBTOOL")
-            or stripped.startswith("AM_PROG_LIBTOOL")
             or stripped == "FT_MUNMAP_PARAM"
             or stripped == "ac_cpp_ft"
             or stripped.endswith(", :)")
@@ -562,7 +558,17 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
     run_cmd(["chmod", "+x", str(unix_libtool)], cwd=repo_dir, env=env)
     if unix_libtool.exists():
         print("[freetype-fix] created builds/unix/libtool wrapper")
-        return True, ""
+        has_backend = any(
+            p.exists() and os.access(p, os.X_OK)
+            for p in (
+                unix_dir / "libtool.real",
+                unix_dir.parent / "libtool",
+                repo_dir / "libtool",
+            )
+        )
+        if has_backend:
+            return True, ""
+        return False, last_err or "created libtool wrapper, but no executable backend libtool script found"
     return False, last_err or "failed to provision builds/unix/libtool"
 
 
@@ -1389,8 +1395,6 @@ def _build_once(
                                 "sed -i '/^[[:space:]]*PKG_CHECK_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
                                 "sed -i '/^[[:space:]]*PKG_CHECK_EXISTS(/c\\: # patched unexpanded pkg-config macro' configure && "
                                 "sed -i '/^[[:space:]]*PKG_WITH_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
-                                "sed -i '/^[[:space:]]*LT_INIT(/c\\: # patched unexpanded libtool macro' configure && "
-                                "sed -i '/^[[:space:]]*LT_PREREQ(/c\\: # patched unexpanded libtool macro' configure && "
                                 "chmod +x configure && ./configure --enable-shared",
                             ]
                         else:
