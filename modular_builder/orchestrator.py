@@ -465,6 +465,64 @@ def _sanitize_freetype_configure(configure_path: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
+    """
+    Some freetype tags require ./builds/unix/libtool during make, but it is occasionally
+    missing after checkout/configure in detached worktrees.
+    """
+    unix_dir = repo_dir / "builds" / "unix"
+    unix_libtool = unix_dir / "libtool"
+    if unix_libtool.exists() and os.access(unix_libtool, os.X_OK):
+        return True, ""
+
+    bootstrap_cmds = [
+        ["bash", "-lc", "cd builds/unix && autoreconf -fi"],
+        ["autoreconf", "-fi"],
+    ]
+    last_err = ""
+    for cmd in bootstrap_cmds:
+        ok, err = run_cmd(cmd, cwd=repo_dir, env=env)
+        if ok and unix_libtool.exists():
+            run_cmd(["chmod", "+x", str(unix_libtool)], cwd=repo_dir, env=env)
+            return True, ""
+        if err:
+            last_err = err
+
+    root_libtool = repo_dir / "libtool"
+    if root_libtool.exists():
+        try:
+            unix_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root_libtool, unix_libtool)
+        except OSError as exc:
+            return False, str(exc)
+        run_cmd(["chmod", "+x", str(unix_libtool)], cwd=repo_dir, env=env)
+        if unix_libtool.exists():
+            print("[freetype-fix] copied top-level libtool to builds/unix/libtool")
+            return True, ""
+
+    wrapper_lines = [
+        "#!/usr/bin/env sh",
+        "if command -v libtool >/dev/null 2>&1; then",
+        '  exec libtool "$@"',
+        "fi",
+        "if [ -x /usr/bin/libtool ]; then",
+        '  exec /usr/bin/libtool "$@"',
+        "fi",
+        'echo "libtool not found" >&2',
+        "exit 127",
+    ]
+    try:
+        unix_dir.mkdir(parents=True, exist_ok=True)
+        unix_libtool.write_text("\n".join(wrapper_lines) + "\n", encoding="utf-8")
+    except OSError as exc:
+        return False, str(exc)
+    run_cmd(["chmod", "+x", str(unix_libtool)], cwd=repo_dir, env=env)
+    if unix_libtool.exists():
+        print("[freetype-fix] created builds/unix/libtool wrapper")
+        return True, ""
+    return False, last_err or "failed to provision builds/unix/libtool"
+
+
 def _patch_freetype_optional_features(repo_dir: Path) -> tuple[bool, str]:
     """
     Disable optional compression backends that are often missing on older build images.
@@ -1253,7 +1311,7 @@ def _build_once(
                                 "sed -i '/^[[:space:]]*PKG_WITH_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
                                 "sed -i '/^[[:space:]]*LT_INIT(/c\\: # patched unexpanded libtool macro' configure && "
                                 "sed -i '/^[[:space:]]*LT_PREREQ(/c\\: # patched unexpanded libtool macro' configure && "
-                                "chmod +x configure && ./configure --enable-shared --disable-static",
+                                "chmod +x configure && ./configure --enable-shared",
                             ]
                         else:
                             configure_cmd = []
@@ -1262,7 +1320,7 @@ def _build_once(
                         if not ok:
                             err = san_err
                             configure_cmd = []
-                        configure_cmd = ["bash", "-lc", "cd builds/unix && ./configure --enable-shared --disable-static"]
+                        configure_cmd = ["bash", "-lc", "cd builds/unix && ./configure --enable-shared"]
             if configure_cmd:
                 ok, err = run_cmd(
                     configure_cmd,
@@ -1278,7 +1336,7 @@ def _build_once(
                     "bash",
                     "-lc",
                     "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && "
-                    "bash ./configure --enable-shared --disable-static",
+                    "bash ./configure --enable-shared",
                 ]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
                 unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
@@ -1420,7 +1478,7 @@ def _build_once(
                     if patch_ok:
                         stub_ok, stub_err = _ensure_freetype_png_stub(profile.repo_dir)
                         if stub_ok:
-                            retry_cfg = ["bash", "-lc", "cd builds/unix && ./configure --enable-shared --disable-static"]
+                            retry_cfg = ["bash", "-lc", "cd builds/unix && ./configure --enable-shared"]
                             print(f"[retry] freetype configure png issue; retry: {' '.join(retry_cfg)}")
                             ok, err = run_cmd(retry_cfg, cwd=profile.repo_dir, env=env)
                         else:
@@ -1444,6 +1502,11 @@ def _build_once(
                     ok, err = run_cmd(retry_cfg, cwd=profile.repo_dir, env=retry_env)
                     if ok:
                         env.update(retry_env)
+            if ok and profile.name == "freetype":
+                libtool_ok, libtool_err = _ensure_freetype_unix_libtool(profile.repo_dir, env)
+                if not libtool_ok:
+                    ok = False
+                    err = libtool_err or err
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
@@ -1681,6 +1744,15 @@ def _build_once(
                     err = cfg_err or err
         if (not ok) and profile.name == "freetype":
             err_text = err or ""
+            if "./builds/unix/libtool: not found" in err_text or "builds/unix/libtool: not found" in err_text:
+                lt_ok, lt_err = _ensure_freetype_unix_libtool(profile.repo_dir, env)
+                if lt_ok:
+                    retry_build = list(build_cmd)
+                    print(f"[retry] freetype missing libtool fixed; retry build: {' '.join(retry_build)}")
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                else:
+                    err = lt_err or err
+            err_text = err or ""
             if "bzlib.h" in err_text or "ftbzip2.c" in err_text:
                 patch_ok, patch_err = _patch_freetype_bzip2_sources(profile.repo_dir)
                 if patch_ok:
@@ -1715,10 +1787,11 @@ def _build_once(
                 or "AC_INIT(" in err_text
                 or "No targets specified and no makefile found" in err_text
             ):
-                bootstrap_cmd = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && bash ./configure"]
+                bootstrap_cmd = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && bash ./configure --enable-shared"]
                 print(f"[retry] freetype build failed; trying bootstrap: {' '.join(bootstrap_cmd)}")
                 setup_ok, setup_err = run_cmd(bootstrap_cmd, cwd=profile.repo_dir, env=env)
                 if setup_ok:
+                    _ensure_freetype_unix_libtool(profile.repo_dir, env)
                     # Re-pick make target based on where Makefile actually exists.
                     if (profile.repo_dir / "builds" / "unix" / "Makefile").exists():
                         retry_build = ["make", "-C", "builds/unix", f"-j{max(1, os.cpu_count() or 1)}"]
@@ -1924,8 +1997,11 @@ def _build_once(
         artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
         if (not artifacts) and profile.name == "freetype":
             jobs = max(1, os.cpu_count() or 1)
+            _ensure_freetype_unix_libtool(profile.repo_dir, env)
+            run_cmd(["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && bash ./configure --enable-shared"], cwd=profile.repo_dir, env=env)
             recover_plan = [
                 ["make", "-C", "builds/unix", f"-j{jobs}"],
+                ["make", "-C", "builds/unix", "shared", f"-j{jobs}"],
                 ["make", "-C", "builds/unix", "all", f"-j{jobs}"],
                 ["make", "-C", "builds/unix", "install", f"-j{jobs}"],
                 ["make", f"-j{jobs}"],
