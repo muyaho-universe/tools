@@ -502,13 +502,16 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
 
     wrapper_lines = [
         "#!/usr/bin/env sh",
-        "if command -v libtool >/dev/null 2>&1; then",
-        '  exec libtool "$@"',
+        "if [ -x ./libtool ]; then",
+        '  exec ./libtool "$@"',
         "fi",
-        "if [ -x /usr/bin/libtool ]; then",
-        '  exec /usr/bin/libtool "$@"',
+        "if [ -x ../libtool ]; then",
+        '  exec ../libtool "$@"',
         "fi",
-        'echo "libtool not found" >&2',
+        "if [ -x ../../libtool ]; then",
+        '  exec ../../libtool "$@"',
+        "fi",
+        'echo "freetype libtool script not found" >&2',
         "exit 127",
     ]
     try:
@@ -521,6 +524,32 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
         print("[freetype-fix] created builds/unix/libtool wrapper")
         return True, ""
     return False, last_err or "failed to provision builds/unix/libtool"
+
+
+def _patch_freetype_libtool_tag(repo_dir: Path) -> tuple[bool, str]:
+    targets = [
+        repo_dir / "builds" / "freetype.mk",
+        repo_dir / "builds" / "unix" / "freetype.mk",
+    ]
+    changed = False
+    for mk in targets:
+        if not mk.exists():
+            continue
+        try:
+            text = mk.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return False, str(exc)
+        new = re.sub(r"(\./builds/unix/libtool)\s+(--mode=)", r"\1 --tag=CC \2", text)
+        new = re.sub(r"(\.\./builds/unix/libtool)\s+(--mode=)", r"\1 --tag=CC \2", new)
+        if new != text:
+            try:
+                mk.write_text(new, encoding="utf-8")
+            except OSError as exc:
+                return False, str(exc)
+            changed = True
+    if changed:
+        print("[freetype-fix] patched freetype makefiles to pass --tag=CC to libtool")
+    return True, ""
 
 
 def _patch_freetype_optional_features(repo_dir: Path) -> tuple[bool, str]:
@@ -1753,6 +1782,15 @@ def _build_once(
                 else:
                     err = lt_err or err
             err_text = err or ""
+            if "libtool:   error: specify a tag with '--tag'" in err_text:
+                tag_ok, tag_err = _patch_freetype_libtool_tag(profile.repo_dir)
+                if tag_ok:
+                    retry_build = list(build_cmd)
+                    print(f"[retry] freetype libtool tag issue; retry build: {' '.join(retry_build)}")
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                else:
+                    err = tag_err or err
+            err_text = err or ""
             if "bzlib.h" in err_text or "ftbzip2.c" in err_text:
                 patch_ok, patch_err = _patch_freetype_bzip2_sources(profile.repo_dir)
                 if patch_ok:
@@ -2018,6 +2056,28 @@ def _build_once(
                 print(f"[retry] freetype artifacts missing; retry cmake fallback build: {' '.join(retry_cmd)}")
                 run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
                 artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+            if not artifacts:
+                cmake_build = "build_freetype_fallback"
+                cfg_try = [
+                    "cmake",
+                    "-S",
+                    ".",
+                    "-B",
+                    cmake_build,
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DBUILD_SHARED_LIBS=ON",
+                    "-DFT_DISABLE_BZIP2=TRUE",
+                    "-DFT_DISABLE_PNG=TRUE",
+                    "-DFT_DISABLE_HARFBUZZ=TRUE",
+                    "-DFT_DISABLE_BROTLI=TRUE",
+                ]
+                print(f"[retry] freetype artifacts missing; trying cmake configure: {' '.join(cfg_try)}")
+                cfg_ok, _ = run_cmd(cfg_try, cwd=profile.repo_dir, env=env)
+                if cfg_ok:
+                    retry_cmd = ["cmake", "--build", cmake_build, "-j", str(jobs)]
+                    print(f"[retry] freetype artifacts missing; trying cmake build: {' '.join(retry_cmd)}")
+                    run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+                    artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
         if not artifacts:
             _debug_artifact_candidates(profile, variant)
             _log_failure(ctx, row, ref_kind, "artifact", err or "artifact not found")
