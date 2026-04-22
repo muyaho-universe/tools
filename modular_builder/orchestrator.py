@@ -473,9 +473,23 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
     unix_dir = repo_dir / "builds" / "unix"
     unix_libtool = unix_dir / "libtool"
     if unix_libtool.exists() and os.access(unix_libtool, os.X_OK):
-        return True, ""
+        # If this is our minimal wrapper, keep healing until a real libtool script exists.
+        try:
+            existing = unix_libtool.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            existing = ""
+        if "freetype libtool script not found" not in existing:
+            return True, ""
 
     bootstrap_cmds = [
+        [
+            "bash",
+            "-lc",
+            "cd builds/unix && "
+            "(test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && "
+            "(libtoolize --force --copy || glibtoolize --force --copy || true) && "
+            "bash ./configure --enable-shared",
+        ],
         ["bash", "-lc", "cd builds/unix && (libtoolize --force --copy || glibtoolize --force --copy || true) && autoreconf -fi"],
         ["bash", "-lc", "(libtoolize --force --copy || glibtoolize --force --copy || true) && autoreconf -fi"],
         ["bash", "-lc", "cd builds/unix && autoreconf -fi"],
@@ -486,7 +500,12 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
         ok, err = run_cmd(cmd, cwd=repo_dir, env=env)
         if ok and unix_libtool.exists():
             run_cmd(["chmod", "+x", str(unix_libtool)], cwd=repo_dir, env=env)
-            return True, ""
+            try:
+                generated = unix_libtool.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                generated = ""
+            if "freetype libtool script not found" not in generated:
+                return True, ""
         if err:
             last_err = err
 
@@ -504,25 +523,39 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
 
     wrapper_lines = [
         "#!/usr/bin/env sh",
+        'SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"',
         'TAG=""',
         'case " $* " in',
         '  *" --tag="*) TAG="";;',
         '  *) TAG="--tag=CC";;',
         "esac",
-        "if [ -x ./libtool ]; then",
-        '  exec ./libtool $TAG "$@"',
+        'if [ -x "$SCRIPT_DIR/libtool.real" ]; then',
+        '  exec "$SCRIPT_DIR/libtool.real" $TAG "$@"',
         "fi",
-        "if [ -x ../libtool ]; then",
-        '  exec ../libtool $TAG "$@"',
+        'if [ -x "$SCRIPT_DIR/../libtool" ]; then',
+        '  exec "$SCRIPT_DIR/../libtool" $TAG "$@"',
         "fi",
-        "if [ -x ../../libtool ]; then",
-        '  exec ../../libtool $TAG "$@"',
+        'if [ -x "$SCRIPT_DIR/../../libtool" ]; then',
+        '  exec "$SCRIPT_DIR/../../libtool" $TAG "$@"',
         "fi",
         'echo "freetype libtool script not found" >&2',
         "exit 127",
     ]
     try:
         unix_dir.mkdir(parents=True, exist_ok=True)
+        if unix_libtool.exists():
+            try:
+                current = unix_libtool.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                current = ""
+            if "freetype libtool script not found" not in current:
+                # Preserve any non-wrapper libtool script as libtool.real.
+                real_libtool = unix_dir / "libtool.real"
+                try:
+                    shutil.copy2(unix_libtool, real_libtool)
+                    run_cmd(["chmod", "+x", str(real_libtool)], cwd=repo_dir, env=env)
+                except OSError:
+                    pass
         unix_libtool.write_text("\n".join(wrapper_lines) + "\n", encoding="utf-8")
     except OSError as exc:
         return False, str(exc)
