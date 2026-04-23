@@ -1091,15 +1091,14 @@ def _patch_dwg2dxf_configure_ac(repo_dir: Path) -> tuple[bool, str]:
     except OSError as exc:
         return False, str(exc)
 
-    m = re.search(r"AC_INIT\(([^)]*)\)", text)
+    m = re.search(r"AC_INIT\s*\(([^)]*)\)", text)
     if not m:
         return True, ""
-    args = m.group(1)
-    # Already has package,version args.
-    if "," in args:
+    args = m.group(1).strip()
+    # Some legacy tags have malformed/empty version slots (e.g. AC_INIT([pkg],, ...)).
+    # Normalize aggressively so autogen/autoreconf can proceed deterministically.
+    if args == "[libredwg],[0.11]":
         return True, ""
-
-    # Keep it simple and robust for legacy tags.
     new_text = text[: m.start()] + "AC_INIT([libredwg],[0.11])" + text[m.end() :]
     try:
         path.write_text(new_text, encoding="utf-8")
