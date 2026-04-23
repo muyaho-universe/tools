@@ -625,11 +625,21 @@ def _patch_freetype_libtool_tag(repo_dir: Path) -> tuple[bool, str]:
             text = mk.read_text(encoding="utf-8", errors="ignore")
         except OSError as exc:
             return False, str(exc)
-        new = re.sub(r"(\./builds/unix/libtool)\s+(--mode=)", r"\1 --tag=CC \2", text)
+        # Prefer forcing LIBTOOL variable itself so downstream rules cannot escape to /usr/bin/libtool.
+        new = re.sub(
+            r"^(\s*LIBTOOL\s*[:?+]?=\s*).*$",
+            r"\1./builds/unix/libtool --tag=CC",
+            text,
+            flags=re.M,
+        )
+        new = re.sub(r"(\./builds/unix/libtool)\s+(--mode=)", r"\1 --tag=CC \2", new)
         new = re.sub(r"(\.\./builds/unix/libtool)\s+(--mode=)", r"\1 --tag=CC \2", new)
         # Force system/bare libtool calls to use the repository-local script.
-        new = re.sub(r"(?<![\w./-])/usr/bin/libtool\s+(--mode=)", r"./builds/unix/libtool --tag=CC \1", new)
-        new = re.sub(r"(^|\s)libtool\s+(--mode=)", r"\1./builds/unix/libtool --tag=CC \2", new)
+        # Handle cases where extra args appear before --mode= (e.g., --silent).
+        new = re.sub(r"(?<![\w./-])/usr/bin/libtool\b", r"./builds/unix/libtool --tag=CC", new)
+        new = re.sub(r"(^|\s)libtool\b", r"\1./builds/unix/libtool --tag=CC", new)
+        # Cleanup accidental duplicate --tag injections after repeated retries.
+        new = re.sub(r"(?:--tag=CC\s+){2,}", "--tag=CC ", new)
         if new != text:
             try:
                 mk.write_text(new, encoding="utf-8")
@@ -1631,6 +1641,11 @@ def _build_once(
                 if not libtool_ok:
                     ok = False
                     err = libtool_err or err
+                else:
+                    tag_ok, tag_err = _patch_freetype_libtool_tag(profile.repo_dir)
+                    if not tag_ok:
+                        ok = False
+                        err = tag_err or err
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
