@@ -442,6 +442,10 @@ def _sanitize_freetype_configure(configure_path: Path) -> tuple[bool, str]:
             or stripped.startswith("PKG_CHECK_MODULES(")
             or stripped.startswith("PKG_CHECK_EXISTS(")
             or stripped.startswith("PKG_WITH_MODULES(")
+            or stripped.startswith("LT_INIT(")
+            or stripped.startswith("LT_PREREQ(")
+            or stripped.startswith("AC_PROG_LIBTOOL")
+            or stripped.startswith("AM_PROG_LIBTOOL")
             or stripped.startswith("AX_PROG_PYTHON_VERSION(")
             or stripped.startswith("AX_PTHREAD(")
             or stripped == "FT_MUNMAP_PARAM"
@@ -484,7 +488,7 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
             "cd builds/unix && "
             "(test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && "
             "(libtoolize --force --copy || glibtoolize --force --copy || true) && "
-            "bash ./configure --enable-shared",
+            "(bash ./configure --enable-shared || bash ./configure)",
         ],
         ["bash", "-lc", "cd builds/unix && (libtoolize --force --copy || glibtoolize --force --copy || true) && autoreconf -fi"],
         ["bash", "-lc", "(libtoolize --force --copy || glibtoolize --force --copy || true) && autoreconf -fi"],
@@ -1395,7 +1399,7 @@ def _build_once(
                                 "sed -i '/^[[:space:]]*PKG_CHECK_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
                                 "sed -i '/^[[:space:]]*PKG_CHECK_EXISTS(/c\\: # patched unexpanded pkg-config macro' configure && "
                                 "sed -i '/^[[:space:]]*PKG_WITH_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
-                                "chmod +x configure && ./configure --enable-shared",
+                                "chmod +x configure && (./configure --enable-shared || ./configure)",
                             ]
                         else:
                             configure_cmd = []
@@ -1404,7 +1408,7 @@ def _build_once(
                         if not ok:
                             err = san_err
                             configure_cmd = []
-                        configure_cmd = ["bash", "-lc", "cd builds/unix && ./configure --enable-shared"]
+                        configure_cmd = ["bash", "-lc", "cd builds/unix && (./configure --enable-shared || ./configure)"]
             if configure_cmd:
                 ok, err = run_cmd(
                     configure_cmd,
@@ -1420,7 +1424,7 @@ def _build_once(
                     "bash",
                     "-lc",
                     "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && "
-                    "bash ./configure --enable-shared",
+                    "(bash ./configure --enable-shared || bash ./configure)",
                 ]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
                 unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
@@ -1562,7 +1566,7 @@ def _build_once(
                     if patch_ok:
                         stub_ok, stub_err = _ensure_freetype_png_stub(profile.repo_dir)
                         if stub_ok:
-                            retry_cfg = ["bash", "-lc", "cd builds/unix && ./configure --enable-shared"]
+                            retry_cfg = ["bash", "-lc", "cd builds/unix && (./configure --enable-shared || ./configure)"]
                             print(f"[retry] freetype configure png issue; retry: {' '.join(retry_cfg)}")
                             ok, err = run_cmd(retry_cfg, cwd=profile.repo_dir, env=env)
                         else:
@@ -1899,7 +1903,7 @@ def _build_once(
                 or "AC_INIT(" in err_text
                 or "No targets specified and no makefile found" in err_text
             ):
-                bootstrap_cmd = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && bash ./configure --enable-shared"]
+                bootstrap_cmd = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && (bash ./configure --enable-shared || bash ./configure)"]
                 print(f"[retry] freetype build failed; trying bootstrap: {' '.join(bootstrap_cmd)}")
                 setup_ok, setup_err = run_cmd(bootstrap_cmd, cwd=profile.repo_dir, env=env)
                 if setup_ok:
@@ -2110,7 +2114,7 @@ def _build_once(
         if (not artifacts) and profile.name == "freetype":
             jobs = max(1, os.cpu_count() or 1)
             _ensure_freetype_unix_libtool(profile.repo_dir, env)
-            run_cmd(["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && bash ./configure --enable-shared"], cwd=profile.repo_dir, env=env)
+            run_cmd(["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && (bash ./configure --enable-shared || bash ./configure)"], cwd=profile.repo_dir, env=env)
             recover_plan = [
                 ["make", "-C", "builds/unix", f"-j{jobs}"],
                 ["make", "-C", "builds/unix", "shared", f"-j{jobs}"],
