@@ -562,6 +562,12 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
         'if [ -x "$SCRIPT_DIR/../../libtool" ]; then',
         '  exec "$SCRIPT_DIR/../../libtool" $TAG "$@"',
         "fi",
+        'if command -v libtool >/dev/null 2>&1; then',
+        '  exec "$(command -v libtool)" $TAG "$@"',
+        "fi",
+        'if command -v glibtool >/dev/null 2>&1; then',
+        '  exec "$(command -v glibtool)" $TAG "$@"',
+        "fi",
         'echo "freetype libtool script not found" >&2',
         "exit 127",
     ]
@@ -595,6 +601,9 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
             )
         )
         if has_backend:
+            return True, ""
+        sys_libtool_ok, _ = run_cmd(["bash", "-lc", "command -v libtool >/dev/null 2>&1 || command -v glibtool >/dev/null 2>&1"], cwd=repo_dir, env=env)
+        if sys_libtool_ok:
             return True, ""
         # Do not fail configure stage only because backend libtool is absent yet.
         # Legacy tags can still proceed and resolve this during build retries.
@@ -1875,6 +1884,19 @@ def _build_once(
                     retry_build = list(build_cmd)
                     print(f"[retry] freetype libtool wrapper issue; retry build: {' '.join(retry_build)}")
                     ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                    if (not ok) and "freetype libtool script not found" in (err or ""):
+                        bootstrap_cmd = [
+                            "bash",
+                            "-lc",
+                            "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw || cp configure.raw configure) && chmod +x configure && (bash ./configure --enable-shared || bash ./configure)",
+                        ]
+                        print(f"[retry] freetype libtool still missing; bootstrap again: {' '.join(bootstrap_cmd)}")
+                        setup_ok, setup_err = run_cmd(bootstrap_cmd, cwd=profile.repo_dir, env=env)
+                        if setup_ok:
+                            _ensure_freetype_unix_libtool(profile.repo_dir, env)
+                            ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                        else:
+                            err = setup_err or err
                 else:
                     err = (lt_err or tag_err or err)
             err_text = err or ""
@@ -1929,6 +1951,7 @@ def _build_once(
                 or "Permission denied" in err_text
                 or "AC_INIT(" in err_text
                 or "No targets specified and no makefile found" in err_text
+                or "freetype libtool script not found" in err_text
             ):
                 bootstrap_cmd = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw || cp configure.raw configure) && chmod +x configure && (bash ./configure --enable-shared || bash ./configure)"]
                 print(f"[retry] freetype build failed; trying bootstrap: {' '.join(bootstrap_cmd)}")
