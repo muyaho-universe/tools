@@ -171,9 +171,19 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
                     env=env,
                 )
                 if not ok:
-                    ok, err = run_cmd(["autoreconf", "-fi"], cwd=profile.repo_dir, env=env)
+                    # Many legacy freetype tags have no configure.ac; fall back to configure.raw directly.
+                    ok, err_copy = run_cmd(
+                        ["bash", "-lc", "cd builds/unix && cp configure.raw configure && chmod +x configure"],
+                        cwd=profile.repo_dir,
+                        env=env,
+                    )
                     if not ok:
-                        return False, err
+                        if (profile.repo_dir / "configure.ac").exists() or (profile.repo_dir / "configure.in").exists():
+                            ok, err_auto = run_cmd(["autoreconf", "-fi"], cwd=profile.repo_dir, env=env)
+                            if not ok:
+                                return False, f"{err}\n{err_auto}"
+                        else:
+                            return False, f"{err}\n{err_copy}"
             if unix_cfg.exists():
                 ok, err = _sanitize_freetype_configure(unix_cfg)
                 if not ok:
@@ -486,7 +496,7 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
             "bash",
             "-lc",
             "cd builds/unix && "
-            "(test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && "
+            "(test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw || cp configure.raw configure) && "
             "(libtoolize --force --copy || glibtoolize --force --copy || true) && "
             "(bash ./configure --enable-shared || bash ./configure)",
         ],
@@ -1394,7 +1404,7 @@ def _build_once(
                             configure_cmd = [
                                 "bash",
                                 "-lc",
-                                "cd builds/unix && autoconf -o configure configure.raw && "
+                                "cd builds/unix && (autoconf -o configure configure.raw || cp configure.raw configure) && "
                                 "sed -i '/^[[:space:]]*PKG_PROG_PKG_CONFIG(/c\\: # patched unexpanded pkg-config macro' configure && "
                                 "sed -i '/^[[:space:]]*PKG_CHECK_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
                                 "sed -i '/^[[:space:]]*PKG_CHECK_EXISTS(/c\\: # patched unexpanded pkg-config macro' configure && "
@@ -1423,7 +1433,7 @@ def _build_once(
                 fallback_cfg = [
                     "bash",
                     "-lc",
-                    "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && "
+                    "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw || cp configure.raw configure) && chmod +x configure && "
                     "(bash ./configure --enable-shared || bash ./configure)",
                 ]
                 print(f"[retry] freetype configure failed; trying: {' '.join(fallback_cfg)}")
@@ -1585,7 +1595,7 @@ def _build_once(
                     retry_env["CFLAGS"] = _append_flag(_append_flag(retry_env.get("CFLAGS", ""), "-fno-PIE"), "-fPIC")
                     retry_env["CXXFLAGS"] = _append_flag(_append_flag(retry_env.get("CXXFLAGS", ""), "-fno-PIE"), "-fPIC")
                     retry_env["LDFLAGS"] = _append_flag(retry_env.get("LDFLAGS", ""), "-no-pie")
-                    retry_cfg = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && bash ./configure"]
+                    retry_cfg = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw || cp configure.raw configure) && chmod +x configure && bash ./configure"]
                     print(f"[retry] freetype configure link issue; trying no-pie configure: {' '.join(retry_cfg)}")
                     ok, err = run_cmd(retry_cfg, cwd=profile.repo_dir, env=retry_env)
                     if ok:
@@ -1903,7 +1913,7 @@ def _build_once(
                 or "AC_INIT(" in err_text
                 or "No targets specified and no makefile found" in err_text
             ):
-                bootstrap_cmd = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && (bash ./configure --enable-shared || bash ./configure)"]
+                bootstrap_cmd = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw || cp configure.raw configure) && chmod +x configure && (bash ./configure --enable-shared || bash ./configure)"]
                 print(f"[retry] freetype build failed; trying bootstrap: {' '.join(bootstrap_cmd)}")
                 setup_ok, setup_err = run_cmd(bootstrap_cmd, cwd=profile.repo_dir, env=env)
                 if setup_ok:
@@ -2114,7 +2124,7 @@ def _build_once(
         if (not artifacts) and profile.name == "freetype":
             jobs = max(1, os.cpu_count() or 1)
             _ensure_freetype_unix_libtool(profile.repo_dir, env)
-            run_cmd(["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw) && chmod +x configure && (bash ./configure --enable-shared || bash ./configure)"], cwd=profile.repo_dir, env=env)
+            run_cmd(["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw || cp configure.raw configure) && chmod +x configure && (bash ./configure --enable-shared || bash ./configure)"], cwd=profile.repo_dir, env=env)
             recover_plan = [
                 ["make", "-C", "builds/unix", f"-j{jobs}"],
                 ["make", "-C", "builds/unix", "shared", f"-j{jobs}"],
