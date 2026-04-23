@@ -621,10 +621,15 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
 
 
 def _patch_freetype_libtool_tag(repo_dir: Path) -> tuple[bool, str]:
-    targets = [
+    targets: list[Path] = [
         repo_dir / "builds" / "freetype.mk",
         repo_dir / "builds" / "unix" / "freetype.mk",
     ]
+    # Newer tags scatter libtool invocations across several *.mk files.
+    for pat in ("**/*.mk", "**/Makefile", "**/Makefile.in"):
+        for p in repo_dir.glob(pat):
+            if p not in targets and p.is_file():
+                targets.append(p)
     changed = False
     for mk in targets:
         if not mk.exists():
@@ -645,7 +650,7 @@ def _patch_freetype_libtool_tag(repo_dir: Path) -> tuple[bool, str]:
         # Force system/bare libtool calls to use the repository-local script.
         # Handle cases where extra args appear before --mode= (e.g., --silent).
         new = re.sub(r"(?<![\w./-])/usr/bin/libtool\b", r"./builds/unix/libtool --tag=CC", new)
-        new = re.sub(r"(^|\s)libtool\b", r"\1./builds/unix/libtool --tag=CC", new)
+        new = re.sub(r"(?<![\w./-])libtool\b", r"./builds/unix/libtool --tag=CC", new)
         # Cleanup accidental duplicate --tag injections after repeated retries.
         new = re.sub(r"(?:--tag=CC\s+){2,}", "--tag=CC ", new)
         if new != text:
@@ -1493,7 +1498,11 @@ def _build_once(
             if profile.name == "dwg2dxf":
                 ok, dwg_err = _ensure_dwg2dxf_configure_script(profile.repo_dir, env)
                 if ok:
-                    configure_cmd = ["sh", "./configure"]
+                    configure_cmd = [
+                        "bash",
+                        "-lc",
+                        "test -x ./configure || sh ./autogen.sh || autoreconf -fi; test -x ./configure && sh ./configure",
+                    ]
                 else:
                     configure_cmd = []
                     err = dwg_err
@@ -1652,7 +1661,11 @@ def _build_once(
                 if "No such file or directory: './configure'" in err_text or "cannot open ./configure" in err_text:
                     regen_ok, regen_err = _ensure_dwg2dxf_configure_script(profile.repo_dir, env)
                     if regen_ok:
-                        retry_cfg = ["sh", "./configure"]
+                        retry_cfg = [
+                            "bash",
+                            "-lc",
+                            "test -x ./configure || sh ./autogen.sh || autoreconf -fi; test -x ./configure && sh ./configure",
+                        ]
                         print(f"[retry] dwg2dxf configure script missing; retry: {' '.join(retry_cfg)}")
                         ok, err = run_cmd(retry_cfg, cwd=profile.repo_dir, env=env)
                     else:
