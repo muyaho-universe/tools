@@ -296,7 +296,7 @@ def _resolve_git_dir(repo_dir: Path) -> Path:
 
 
 def _ensure_autotools_aux_files(base_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
-    names = ["install-sh", "config.guess", "config.sub"]
+    names = ["install-sh", "config.guess", "config.sub", "compile"]
     missing = [n for n in names if not (base_dir / n).exists()]
     if not missing:
         return True, ""
@@ -315,7 +315,7 @@ def _ensure_autotools_aux_files(base_dir: Path, env: dict[str, str]) -> tuple[bo
             for src in repo_root.rglob(name):
                 if src.is_file() and src.parent != base_dir:
                     shutil.copy2(src, base_dir / name)
-                    if name == "install-sh":
+                    if name in {"install-sh", "config.guess", "config.sub", "compile"}:
                         run_cmd(["chmod", "+x", str(base_dir / name)], cwd=base_dir, env=env)
                     copied = True
                     break
@@ -341,7 +341,7 @@ def _ensure_autotools_aux_files(base_dir: Path, env: dict[str, str]) -> tuple[bo
             if src.exists():
                 try:
                     shutil.copy2(src, base_dir / name)
-                    if name == "install-sh":
+                    if name in {"install-sh", "config.guess", "config.sub", "compile"}:
                         run_cmd(["chmod", "+x", str(base_dir / name)], cwd=base_dir, env=env)
                     copied = True
                     break
@@ -371,6 +371,13 @@ def _ensure_autotools_aux_files(base_dir: Path, env: dict[str, str]) -> tuple[bo
                     encoding="utf-8",
                 )
                 run_cmd(["chmod", "+x", "config.sub"], cwd=base_dir, env=env)
+            if "compile" in missing:
+                # Minimal automake compile wrapper fallback.
+                (base_dir / "compile").write_text(
+                    "#!/bin/sh\nexec \"$@\"\n",
+                    encoding="utf-8",
+                )
+                run_cmd(["chmod", "+x", "compile"], cwd=base_dir, env=env)
         except OSError as exc:
             return False, str(exc)
         missing = [n for n in names if not (base_dir / n).exists()]
@@ -1106,6 +1113,9 @@ def _ensure_dwg2dxf_configure_script(repo_dir: Path, env: dict[str, str]) -> tup
     cfg = repo_dir / "configure"
     if cfg.exists():
         run_cmd(["chmod", "+x", str(cfg)], cwd=repo_dir, env=env)
+        ok, err = _ensure_autotools_aux_files(repo_dir, env)
+        if not ok:
+            return False, err
         return True, ""
 
     ok, err = _patch_dwg2dxf_configure_ac(repo_dir)
@@ -1132,6 +1142,9 @@ def _ensure_dwg2dxf_configure_script(repo_dir: Path, env: dict[str, str]) -> tup
 
     if cfg.exists():
         run_cmd(["chmod", "+x", str(cfg)], cwd=repo_dir, env=env)
+        ok, err = _ensure_autotools_aux_files(repo_dir, env)
+        if not ok:
+            return False, err
         return True, ""
     return False, "\n".join(errors) if errors else "dwg2dxf configure script was not generated"
 
