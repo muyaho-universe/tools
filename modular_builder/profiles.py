@@ -267,7 +267,7 @@ def build_profiles() -> dict[str, BuildProfile]:
             name="dwg2dxf",
             repo_dir=Path(os.getenv("LIBREDWG_DIR", "/home/user/libredwg")),
             repo_url="https://github.com/LibreDWG/libredwg.git",
-            configure_cmd=["./configure"],
+            configure_cmd=["sh", "./configure"],
             pre_steps=[["./autogen.sh"]],
             build_cmd=["make"],
             clean_cmd=["make", "clean"],

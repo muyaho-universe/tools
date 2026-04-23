@@ -149,7 +149,7 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
             return False, err
 
     # Some historical tags do not ship ./configure, but can still generate it.
-    configure_missing = bool(profile.configure_cmd) and profile.configure_cmd[0] == "./configure" and not configure_path.exists()
+    configure_missing = bool(profile.configure_cmd) and ("./configure" in profile.configure_cmd) and not configure_path.exists()
     if configure_missing:
         autogen = profile.repo_dir / "autogen.sh"
         if autogen.exists() and profile.name not in {"freetype", "libtiff", "dwg2dxf"}:
