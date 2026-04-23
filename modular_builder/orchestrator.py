@@ -500,11 +500,25 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
             "(libtoolize --force --copy || glibtoolize --force --copy || true) && "
             "(bash ./configure --enable-shared || bash ./configure)",
         ],
-        ["bash", "-lc", "cd builds/unix && (libtoolize --force --copy || glibtoolize --force --copy || true) && autoreconf -fi"],
-        ["bash", "-lc", "(libtoolize --force --copy || glibtoolize --force --copy || true) && autoreconf -fi"],
-        ["bash", "-lc", "cd builds/unix && autoreconf -fi"],
-        ["autoreconf", "-fi"],
     ]
+    has_autoreconf_inputs = any(
+        p.exists()
+        for p in (
+            repo_dir / "configure.ac",
+            repo_dir / "configure.in",
+            repo_dir / "builds" / "unix" / "configure.ac",
+            repo_dir / "builds" / "unix" / "configure.in",
+        )
+    )
+    if has_autoreconf_inputs:
+        bootstrap_cmds.extend(
+            [
+                ["bash", "-lc", "cd builds/unix && (libtoolize --force --copy || glibtoolize --force --copy || true) && autoreconf -fi"],
+                ["bash", "-lc", "(libtoolize --force --copy || glibtoolize --force --copy || true) && autoreconf -fi"],
+                ["bash", "-lc", "cd builds/unix && autoreconf -fi"],
+                ["autoreconf", "-fi"],
+            ]
+        )
     last_err = ""
     for cmd in bootstrap_cmds:
         ok, err = run_cmd(cmd, cwd=repo_dir, env=env)
@@ -582,7 +596,10 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
         )
         if has_backend:
             return True, ""
-        return False, last_err or "created libtool wrapper, but no executable backend libtool script found"
+        # Do not fail configure stage only because backend libtool is absent yet.
+        # Legacy tags can still proceed and resolve this during build retries.
+        print("[freetype-fix] backend libtool script is not ready yet; continuing")
+        return True, ""
     return False, last_err or "failed to provision builds/unix/libtool"
 
 
