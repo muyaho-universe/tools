@@ -107,6 +107,10 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
             # libtiff autogen on old tags tries network fetch of config.guess/config.sub.
             # Avoid flaky network dependency; fallback autoreconf path below handles bootstrap.
             continue
+        if profile.name == "dwg2dxf" and first.endswith("autogen.sh"):
+            # Some libredwg snapshots (e.g., release_0.11) have broken autotools metadata.
+            # Skip autogen and prefer the shipped configure script when available.
+            continue
 
         if first.endswith("autogen.sh") and configure_path.exists():
             continue
@@ -148,12 +152,12 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
     configure_missing = bool(profile.configure_cmd) and profile.configure_cmd[0] == "./configure" and not configure_path.exists()
     if configure_missing:
         autogen = profile.repo_dir / "autogen.sh"
-        if autogen.exists() and profile.name not in {"freetype", "libtiff"}:
+        if autogen.exists() and profile.name not in {"freetype", "libtiff", "dwg2dxf"}:
             ok, err = run_cmd(["sh", "./autogen.sh"], cwd=profile.repo_dir, env=env)
             if not ok:
                 return False, err
         if (
-            profile.name != "freetype"
+            profile.name not in {"freetype", "dwg2dxf"}
             and not configure_path.exists()
             and ((profile.repo_dir / "configure.ac").exists() or (profile.repo_dir / "configure.in").exists())
         ):
