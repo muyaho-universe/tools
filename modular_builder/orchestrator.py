@@ -1091,15 +1091,35 @@ def _patch_dwg2dxf_configure_ac(repo_dir: Path) -> tuple[bool, str]:
     except OSError as exc:
         return False, str(exc)
 
-    m = re.search(r"AC_INIT\s*\(([^)]*)\)", text)
+    m = re.search(r"AC_INIT\s*\(", text)
     if not m:
         return True, ""
-    args = m.group(1).strip()
-    # Some legacy tags have malformed/empty version slots (e.g. AC_INIT([pkg],, ...)).
-    # Normalize aggressively so autogen/autoreconf can proceed deterministically.
-    if args == "[libredwg],[0.11]":
+
+    # Replace the whole AC_INIT(...) call with a minimal stable form.
+    # We must parse balanced parentheses because nested calls such as m4_esyscmd(...)
+    # appear inside AC_INIT args on some tags.
+    open_paren = text.find("(", m.start())
+    if open_paren == -1:
         return True, ""
-    new_text = text[: m.start()] + "AC_INIT([libredwg],[0.11])" + text[m.end() :]
+    depth = 0
+    close_paren = -1
+    for i in range(open_paren, len(text)):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                close_paren = i
+                break
+    if close_paren == -1:
+        return False, "failed to parse AC_INIT(...) in configure.ac"
+
+    replacement = "AC_INIT([libredwg],[0.11])"
+    current = text[m.start() : close_paren + 1]
+    if current.strip() == replacement:
+        return True, ""
+    new_text = text[: m.start()] + replacement + text[close_paren + 1 :]
     try:
         path.write_text(new_text, encoding="utf-8")
     except OSError as exc:
