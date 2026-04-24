@@ -1557,7 +1557,8 @@ def _build_once(
                     configure_cmd = []
                     err = dwg_err
             if profile.name == "freetype":
-                # Force legacy freetype to configure from builds/unix consistently.
+                # Prefer top-level configure for modern tags, fallback to builds/unix for legacy tags.
+                top_cfg = profile.repo_dir / "configure"
                 unix_cfg = profile.repo_dir / "builds" / "unix" / "configure"
                 raw_cfg = profile.repo_dir / "builds" / "unix" / "configure.raw"
                 ok, aux_err = _ensure_autotools_aux_files(profile.repo_dir, env)
@@ -1574,26 +1575,32 @@ def _build_once(
                     configure_cmd = []
 
                 if configure_cmd:
-                    if (not unix_cfg.exists()) or _looks_like_autoconf_input(unix_cfg):
-                        if raw_cfg.exists():
-                            configure_cmd = [
-                                "bash",
-                                "-lc",
-                                "cd builds/unix && (autoconf -o configure configure.raw || cp configure.raw configure) && "
-                                "sed -i '/^[[:space:]]*PKG_PROG_PKG_CONFIG(/c\\: # patched unexpanded pkg-config macro' configure && "
-                                "sed -i '/^[[:space:]]*PKG_CHECK_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
-                                "sed -i '/^[[:space:]]*PKG_CHECK_EXISTS(/c\\: # patched unexpanded pkg-config macro' configure && "
-                                "sed -i '/^[[:space:]]*PKG_WITH_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
-                                "chmod +x configure && (./configure --enable-shared || ./configure)",
-                            ]
-                        else:
-                            configure_cmd = []
+                    if top_cfg.exists() and not _looks_like_autoconf_input(top_cfg):
+                        configure_cmd = ["bash", "-lc", "./configure --enable-shared || ./configure"]
                     else:
-                        ok, san_err = _sanitize_freetype_configure(unix_cfg)
-                        if not ok:
-                            err = san_err
-                            configure_cmd = []
-                        configure_cmd = ["bash", "-lc", "cd builds/unix && (./configure --enable-shared || ./configure)"]
+                        if (not unix_cfg.exists()) or _looks_like_autoconf_input(unix_cfg):
+                            if raw_cfg.exists():
+                                configure_cmd = [
+                                    "bash",
+                                    "-lc",
+                                    "cd builds/unix && (autoconf -o configure configure.raw || cp configure.raw configure) && "
+                                    "sed -i '/^[[:space:]]*PKG_PROG_PKG_CONFIG(/c\\: # patched unexpanded pkg-config macro' configure && "
+                                    "sed -i '/^[[:space:]]*PKG_CHECK_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
+                                    "sed -i '/^[[:space:]]*PKG_CHECK_EXISTS(/c\\: # patched unexpanded pkg-config macro' configure && "
+                                    "sed -i '/^[[:space:]]*PKG_WITH_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
+                                    "chmod +x configure && (./configure --enable-shared || ./configure)",
+                                ]
+                            else:
+                                configure_cmd = []
+                        else:
+                            ok, san_err = _sanitize_freetype_configure(unix_cfg)
+                            if not ok:
+                                err = san_err
+                                configure_cmd = []
+                            configure_cmd = ["bash", "-lc", "cd builds/unix && (./configure --enable-shared || ./configure)"]
+                    if configure_cmd and not (top_cfg.exists() and not _looks_like_autoconf_input(top_cfg)):
+                        # Keep unix build scripts using local libtool wrapper.
+                        _patch_freetype_libtool_tag(profile.repo_dir)
             if configure_cmd:
                 ok, err = run_cmd(
                     configure_cmd,
@@ -1818,10 +1825,10 @@ def _build_once(
                 build_cmd = ["make", "-C", "expat"]
         if profile.name == "freetype" and not freetype_cmake_built:
             # Legacy freetype tags vary: Makefile can be generated at top-level or builds/unix.
-            if (profile.repo_dir / "builds" / "unix" / "Makefile").exists():
-                build_cmd = ["make", "-C", "builds/unix"]
-            elif (profile.repo_dir / "Makefile").exists():
+            if (profile.repo_dir / "Makefile").exists():
                 build_cmd = ["make"]
+            elif (profile.repo_dir / "builds" / "unix" / "Makefile").exists():
+                build_cmd = ["make", "-C", "builds/unix"]
             else:
                 # Default to builds/unix; failure path will bootstrap/re-pick automatically.
                 build_cmd = ["make", "-C", "builds/unix"]
@@ -1841,6 +1848,13 @@ def _build_once(
             if profile.name == "dwg2dxf":
                 jobs = 1
             build_cmd.append(f"-j{jobs}")
+        if build_cmd and build_cmd[0] == "make" and profile.name == "freetype":
+            if "-C" in build_cmd and "builds/unix" in build_cmd:
+                if not any(token.startswith("LIBTOOL=") for token in build_cmd):
+                    build_cmd.append("LIBTOOL=./libtool")
+            else:
+                if not any(token.startswith("LIBTOOL=") for token in build_cmd):
+                    build_cmd.append("LIBTOOL=./builds/unix/libtool")
         if build_cmd:
             ok, err = run_cmd(build_cmd, cwd=profile.repo_dir, env=env)
         else:
