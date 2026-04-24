@@ -1634,6 +1634,8 @@ def _build_once(
                     cmake_build,
                     "-DCMAKE_BUILD_TYPE=Release",
                     "-DBUILD_SHARED_LIBS=ON",
+                    "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=TRUE",
                     "-DFT_DISABLE_BZIP2=TRUE",
                     "-DFT_DISABLE_PNG=TRUE",
                     "-DFT_DISABLE_HARFBUZZ=TRUE",
@@ -1650,6 +1652,8 @@ def _build_once(
                         cmake_build,
                         "-DCMAKE_BUILD_TYPE=Release",
                         "-DBUILD_SHARED_LIBS=OFF",
+                        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+                        "-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=TRUE",
                         "-DFT_DISABLE_BZIP2=TRUE",
                         "-DFT_DISABLE_PNG=TRUE",
                         "-DFT_DISABLE_HARFBUZZ=TRUE",
@@ -1660,6 +1664,29 @@ def _build_once(
                 if ok:
                     build_try = ["cmake", "--build", cmake_build, "-j", str(max(1, os.cpu_count() or 1))]
                     ok, err = run_cmd(build_try, cwd=profile.repo_dir, env=env)
+                    if not ok:
+                        # Shared fallback can fail when only non-PIC static deps are available (e.g., libz.a).
+                        cfg_try = [
+                            "cmake",
+                            "-S",
+                            ".",
+                            "-B",
+                            cmake_build,
+                            "-DCMAKE_BUILD_TYPE=Release",
+                            "-DBUILD_SHARED_LIBS=OFF",
+                            "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+                            "-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=TRUE",
+                            "-DFT_DISABLE_BZIP2=TRUE",
+                            "-DFT_DISABLE_PNG=TRUE",
+                            "-DFT_DISABLE_HARFBUZZ=TRUE",
+                            "-DFT_DISABLE_BROTLI=TRUE",
+                        ]
+                        print(f"[retry] freetype cmake shared build failed; trying static rebuild: {' '.join(cfg_try)}")
+                        cfg2_ok, cfg2_err = run_cmd(cfg_try, cwd=profile.repo_dir, env=env)
+                        if cfg2_ok:
+                            ok, err = run_cmd(build_try, cwd=profile.repo_dir, env=env)
+                        else:
+                            err = cfg2_err or err
                     freetype_cmake_built = ok
                 else:
                     err = cfg_err or err
@@ -1791,7 +1818,17 @@ def _build_once(
                     retry_env["CFLAGS"] = _append_flag(_append_flag(retry_env.get("CFLAGS", ""), "-fno-PIE"), "-fPIC")
                     retry_env["CXXFLAGS"] = _append_flag(_append_flag(retry_env.get("CXXFLAGS", ""), "-fno-PIE"), "-fPIC")
                     retry_env["LDFLAGS"] = _append_flag(retry_env.get("LDFLAGS", ""), "-no-pie")
-                    retry_cfg = ["bash", "-lc", "cd builds/unix && (test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw || cp configure.raw configure) && chmod +x configure && bash ./configure"]
+                    retry_cfg = [
+                        "bash",
+                        "-lc",
+                        "cd builds/unix && "
+                        "(test -x configure && ! grep -q 'AC_INIT(' configure || autoconf -o configure configure.raw || cp configure.raw configure) && "
+                        "sed -i '/^[[:space:]]*PKG_PROG_PKG_CONFIG(/c\\: # patched unexpanded pkg-config macro' configure && "
+                        "sed -i '/^[[:space:]]*PKG_CHECK_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
+                        "sed -i '/^[[:space:]]*PKG_CHECK_EXISTS(/c\\: # patched unexpanded pkg-config macro' configure && "
+                        "sed -i '/^[[:space:]]*PKG_WITH_MODULES(/c\\: # patched unexpanded pkg-config macro' configure && "
+                        "chmod +x configure && bash ./configure",
+                    ]
                     print(f"[retry] freetype configure link issue; trying no-pie configure: {' '.join(retry_cfg)}")
                     ok, err = run_cmd(retry_cfg, cwd=profile.repo_dir, env=retry_env)
                     if ok:
@@ -2376,6 +2413,8 @@ def _build_once(
                     cmake_build,
                     "-DCMAKE_BUILD_TYPE=Release",
                     "-DBUILD_SHARED_LIBS=ON",
+                    "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=TRUE",
                     "-DFT_DISABLE_BZIP2=TRUE",
                     "-DFT_DISABLE_PNG=TRUE",
                     "-DFT_DISABLE_HARFBUZZ=TRUE",
