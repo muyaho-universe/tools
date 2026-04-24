@@ -135,6 +135,9 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
         ok, err = _patch_freetype_optional_features(profile.repo_dir)
         if not ok:
             return False, err
+        ok, err = _strip_werror_from_makefiles(profile.repo_dir)
+        if not ok:
+            return False, err
         ok, err = _patch_freetype_bzip2_sources(profile.repo_dir)
         if not ok:
             return False, err
@@ -578,10 +581,16 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
         '  exec "$SCRIPT_DIR/../../libtool" $TAG "$@"',
         "fi",
         'if command -v libtool >/dev/null 2>&1; then',
-        '  exec "$(command -v libtool)" $TAG "$@"',
+        '  _lt="$(command -v libtool)"',
+        '  if ! grep -q "@RC@" "$_lt" 2>/dev/null; then',
+        '    exec "$_lt" $TAG "$@"',
+        "  fi",
         "fi",
         'if command -v glibtool >/dev/null 2>&1; then',
-        '  exec "$(command -v glibtool)" $TAG "$@"',
+        '  _lt="$(command -v glibtool)"',
+        '  if ! grep -q "@RC@" "$_lt" 2>/dev/null; then',
+        '    exec "$_lt" $TAG "$@"',
+        "  fi",
         "fi",
         'echo "freetype libtool script not found" >&2',
         "exit 127",
@@ -617,7 +626,16 @@ def _ensure_freetype_unix_libtool(repo_dir: Path, env: dict[str, str]) -> tuple[
         )
         if has_backend:
             return True, ""
-        sys_libtool_ok, _ = run_cmd(["bash", "-lc", "command -v libtool >/dev/null 2>&1 || command -v glibtool >/dev/null 2>&1"], cwd=repo_dir, env=env)
+        sys_libtool_ok, _ = run_cmd(
+            [
+                "bash",
+                "-lc",
+                "lt=$(command -v libtool 2>/dev/null || command -v glibtool 2>/dev/null || true); "
+                "test -n \"$lt\" && ! grep -q '@RC@' \"$lt\" 2>/dev/null",
+            ],
+            cwd=repo_dir,
+            env=env,
+        )
         if sys_libtool_ok:
             return True, ""
         # Do not fail configure stage only because backend libtool is absent yet.
@@ -1494,10 +1512,10 @@ def _build_once(
             f"-I{profile.repo_dir / 'src' / 'sfnt'} {cpp}"
         ).strip()
         env["CFLAGS"] = (
-            env.get("CFLAGS", "") + " -Wno-error -Wno-cpp -Wno-error=cpp"
+            env.get("CFLAGS", "") + " -Wno-error -Wno-cpp -Wno-error=cpp -Wno-error=pedantic -Wno-pedantic"
         ).strip()
         env["CXXFLAGS"] = (
-            env.get("CXXFLAGS", "") + " -Wno-error -Wno-cpp -Wno-error=cpp"
+            env.get("CXXFLAGS", "") + " -Wno-error -Wno-cpp -Wno-error=cpp -Wno-error=pedantic -Wno-pedantic"
         ).strip()
     openssl_safe_mode = profile.name == "openssl"
     freetype_cmake_built = False
