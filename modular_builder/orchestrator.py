@@ -150,6 +150,9 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
         ok, err = _ensure_freetype_png_stub(profile.repo_dir)
         if not ok:
             return False, err
+        ok, err = _patch_freetype_brotli_sources(profile.repo_dir)
+        if not ok:
+            return False, err
 
     # Some historical tags do not ship ./configure, but can still generate it.
     configure_missing = bool(profile.configure_cmd) and ("./configure" in profile.configure_cmd) and not configure_path.exists()
@@ -769,7 +772,7 @@ def _patch_freetype_optional_features(repo_dir: Path) -> tuple[bool, str]:
         rule_changed = False
         for ln in lines:
             low = ln.lower()
-            if ("pngshim.c" in low) or ("ftbzip2.c" in low):
+            if ("pngshim.c" in low) or ("ftbzip2.c" in low) or ("sfwoff2.c" in low) or ("brotli" in low):
                 new_lines.append(f"# {ln}")
                 rule_changed = True
             else:
@@ -920,6 +923,68 @@ def _patch_freetype_png_sources(repo_dir: Path) -> tuple[bool, str]:
                 return False, str(exc)
     if changed_any:
         print("[freetype-fix] patched pngshim sources to use local png.h stub")
+    return True, ""
+
+
+def _patch_freetype_brotli_sources(repo_dir: Path) -> tuple[bool, str]:
+    """
+    Disable WOFF2/brotli compilation path in legacy freetype tags without host brotli headers.
+    We do this by removing sfwoff2.c inclusion from sfnt.c and commenting module entries.
+    """
+    changed_any = False
+
+    for path in repo_dir.glob("**/sfnt.c"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return False, str(exc)
+        new = re.sub(
+            r'^\s*#\s*include\s*"sfwoff2\.c"\s*$',
+            "/* #include \"sfwoff2.c\" */ /* patched: disable WOFF2/brotli */",
+            text,
+            flags=re.M,
+        )
+        if new != text:
+            try:
+                path.write_text(new, encoding="utf-8")
+                changed_any = True
+            except OSError as exc:
+                return False, str(exc)
+
+    module_files: list[Path] = []
+    for p in repo_dir.glob("**/modules.cfg"):
+        module_files.append(p)
+    for p in repo_dir.glob("**/modules.cfg.in"):
+        module_files.append(p)
+    for p in repo_dir.glob("**/*.mk"):
+        module_files.append(p)
+    for path in module_files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        lines = text.splitlines()
+        new_lines: list[str] = []
+        local_changed = False
+        for ln in lines:
+            low = ln.lower()
+            if ("sfwoff2" in low) or ("brotli" in low):
+                if ln.lstrip().startswith("#"):
+                    new_lines.append(ln)
+                else:
+                    new_lines.append(f"# {ln}")
+                local_changed = True
+            else:
+                new_lines.append(ln)
+        if local_changed:
+            try:
+                path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+                changed_any = True
+            except OSError as exc:
+                return False, str(exc)
+
+    if changed_any:
+        print("[freetype-fix] disabled sfwoff2/brotli sources")
     return True, ""
 
 
@@ -1636,6 +1701,10 @@ def _build_once(
                     "-DBUILD_SHARED_LIBS=ON",
                     "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
                     "-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=TRUE",
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_Brotli=TRUE",
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_BrotliDec=TRUE",
+                    "-DFT_REQUIRE_BROTLI=FALSE",
+                    "-DFT_WITH_BROTLI=OFF",
                     "-DFT_DISABLE_BZIP2=TRUE",
                     "-DFT_DISABLE_PNG=TRUE",
                     "-DFT_DISABLE_HARFBUZZ=TRUE",
@@ -1654,6 +1723,10 @@ def _build_once(
                         "-DBUILD_SHARED_LIBS=OFF",
                         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
                         "-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=TRUE",
+                        "-DCMAKE_DISABLE_FIND_PACKAGE_Brotli=TRUE",
+                        "-DCMAKE_DISABLE_FIND_PACKAGE_BrotliDec=TRUE",
+                        "-DFT_REQUIRE_BROTLI=FALSE",
+                        "-DFT_WITH_BROTLI=OFF",
                         "-DFT_DISABLE_BZIP2=TRUE",
                         "-DFT_DISABLE_PNG=TRUE",
                         "-DFT_DISABLE_HARFBUZZ=TRUE",
@@ -1676,6 +1749,10 @@ def _build_once(
                             "-DBUILD_SHARED_LIBS=OFF",
                             "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
                             "-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=TRUE",
+                            "-DCMAKE_DISABLE_FIND_PACKAGE_Brotli=TRUE",
+                            "-DCMAKE_DISABLE_FIND_PACKAGE_BrotliDec=TRUE",
+                            "-DFT_REQUIRE_BROTLI=FALSE",
+                            "-DFT_WITH_BROTLI=OFF",
                             "-DFT_DISABLE_BZIP2=TRUE",
                             "-DFT_DISABLE_PNG=TRUE",
                             "-DFT_DISABLE_HARFBUZZ=TRUE",
@@ -2163,6 +2240,15 @@ def _build_once(
                 else:
                     err = patch_err or err
             err_text = err or ""
+            if "brotli/decode.h" in err_text or "sfwoff2.c" in err_text:
+                patch_ok, patch_err = _patch_freetype_brotli_sources(profile.repo_dir)
+                if patch_ok:
+                    retry_build = list(build_cmd)
+                    print(f"[retry] freetype brotli issue; retry build: {' '.join(retry_build)}")
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=env)
+                else:
+                    err = patch_err or err
+            err_text = err or ""
             if (
                 "detect.mk" in err_text
                 or "./configure: not found" in err_text
@@ -2193,6 +2279,12 @@ def _build_once(
                             cmake_build,
                             "-DCMAKE_BUILD_TYPE=Release",
                             "-DBUILD_SHARED_LIBS=OFF",
+                            "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+                            "-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=TRUE",
+                            "-DCMAKE_DISABLE_FIND_PACKAGE_Brotli=TRUE",
+                            "-DCMAKE_DISABLE_FIND_PACKAGE_BrotliDec=TRUE",
+                            "-DFT_REQUIRE_BROTLI=FALSE",
+                            "-DFT_WITH_BROTLI=OFF",
                             "-DFT_DISABLE_BZIP2=TRUE",
                             "-DFT_DISABLE_PNG=TRUE",
                             "-DFT_DISABLE_HARFBUZZ=TRUE",
@@ -2415,6 +2507,10 @@ def _build_once(
                     "-DBUILD_SHARED_LIBS=ON",
                     "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
                     "-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=TRUE",
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_Brotli=TRUE",
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_BrotliDec=TRUE",
+                    "-DFT_REQUIRE_BROTLI=FALSE",
+                    "-DFT_WITH_BROTLI=OFF",
                     "-DFT_DISABLE_BZIP2=TRUE",
                     "-DFT_DISABLE_PNG=TRUE",
                     "-DFT_DISABLE_HARFBUZZ=TRUE",
