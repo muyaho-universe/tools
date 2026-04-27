@@ -2463,6 +2463,23 @@ def _build_once(
             run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
             artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
         if (not artifacts) and profile.name == "openssl":
+            # Some historical commits produce only static outputs with perl Configure.
+            # Retry with ./config shared to force SHLIB settings in legacy trees.
+            print("[retry] openssl shared artifacts still missing; reconfigure with ./config shared no-asm")
+            run_cmd(["make", "clean"], cwd=profile.repo_dir, env=env)
+            cfg_cmd = [
+                "bash",
+                "-lc",
+                "if [ -x ./config ]; then ./config shared no-asm; else perl Configure linux-x86_64 shared no-asm; fi",
+            ]
+            cfg_ok, cfg_err = run_cmd(cfg_cmd, cwd=profile.repo_dir, env=env)
+            if cfg_ok:
+                build_retry = ["make", f"-j{jobs}"]
+                run_cmd(build_retry, cwd=profile.repo_dir, env=env)
+                artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+            else:
+                err = cfg_err or err
+        if (not artifacts) and profile.name == "openssl":
             static_hits: list[str] = []
             for pat in ("**/libcrypto.a", "**/libssl.a"):
                 for p in sorted(profile.repo_dir.glob(pat)):
