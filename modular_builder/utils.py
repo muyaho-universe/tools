@@ -116,6 +116,8 @@ def is_real_binary_or_library(path: Path) -> bool:
         return (".so" in base) or base.endswith(".a") or os.access(path, os.X_OK)
 
     if "elf" in desc:
+        if "relocatable" in desc:
+            return False
         return True
     if "ar archive" in desc:
         return True

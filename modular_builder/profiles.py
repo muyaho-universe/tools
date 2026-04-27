@@ -3,14 +3,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Dict, List
 
 from .models import BuildRow
 from .utils import is_real_binary_or_library
 
 
-PreStep = Callable[[Path, dict[str, str], BuildRow], None]
-ArtifactResolver = Callable[[Path, BuildRow, str], list[Path]]
+PreStep = Callable[[Path, Dict[str, str], BuildRow], None]
+ArtifactResolver = Callable[[Path, BuildRow, str], List[Path]]
 
 
 @dataclass(frozen=True)
@@ -82,15 +82,28 @@ def _liblouis_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Pat
 
 
 def _libtiff_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path]:
+    shared = _generic_resolver(
+        repo_dir,
+        row,
+        [
+            "libtiff/.libs/libtiff.so*",
+            ".libs/libtiff.so*",
+            "**/libtiff.so*",
+        ],
+    )
+    if shared:
+        return shared
+
     leaf = Path(row.file).stem
     choices = [
+        repo_dir / "tools" / ".libs" / leaf,
         repo_dir / "tools" / leaf,
         repo_dir / leaf,
     ]
     valid = [p for p in choices if p.exists() and is_real_binary_or_library(p)]
     if valid:
         return valid
-    return _generic_resolver(repo_dir, row, ["tools/*", "*/.libs/*.so*"])
+    return _generic_resolver(repo_dir, row, ["*/.libs/*.so*"])
 
 
 def _ffmpeg_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path]:
@@ -249,7 +262,7 @@ def build_profiles() -> dict[str, BuildProfile]:
             build_cmd=["make"],
             clean_cmd=["make", "clean"],
             env_overrides=base,
-            artifact_globs=["tools/*"],
+            artifact_globs=["libtiff/.libs/libtiff.so*", ".libs/libtiff.so*", "**/libtiff.so*"],
             artifact_resolver=_libtiff_resolver,
         ),
         "pcf2bdf": BuildProfile(
