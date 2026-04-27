@@ -96,18 +96,10 @@ def is_real_binary_or_library(path: Path) -> bool:
     if not path.is_file():
         return False
 
-    bad_suffixes = {
-        ".1",
-        ".3",
-        ".5",
-        ".7",
-        ".8",
-        ".txt",
-        ".md",
-        ".in",
-        ".pc",
-        ".la",
-    }
+    # Only skip obvious non-binary text/meta files here.
+    # NOTE: versioned shared objects such as libcrypto.so.1.1 have suffix ".1";
+    # those must not be rejected by suffix-only filtering.
+    bad_suffixes = {".txt", ".md", ".in", ".pc", ".la"}
     if path.suffix.lower() in bad_suffixes:
         return False
 
