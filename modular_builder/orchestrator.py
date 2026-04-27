@@ -1949,7 +1949,8 @@ def _build_once(
         if profile.name == "freetype" and freetype_cmake_built:
             build_cmd = []
         if openssl_safe_mode:
-            build_cmd = ["make", "build_libs"]
+            # OpenSSL shared-only mode: prefer full make so .so artifacts are materialized.
+            build_cmd = ["make"]
         if build_cmd == ["make"]:
             jobs = max(1, os.cpu_count() or 1)
             if profile.name == "openssl" and variant.compiler == "clang":
@@ -1973,15 +1974,10 @@ def _build_once(
             ok, err = run_cmd(build_cmd, cwd=profile.repo_dir, env=env)
         else:
             ok, err = True, ""
-        if (not ok) and openssl_safe_mode and "No rule to make target" in (err or "") and "build_libs" in (err or ""):
-            retry_cmd = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
-            print(f"[retry] openssl release build_libs target missing; trying: {' '.join(retry_cmd)}")
-            ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name == "openssl":
-            # For old OpenSSL tags, full "make" can fail while library-only target still succeeds.
-            jobs = 1 if variant.compiler == "clang" else max(1, os.cpu_count() or 1)
-            retry_cmd = ["make", "build_libs", f"-j{jobs}"]
-            print(f"[retry] openssl build failed; trying: {' '.join(retry_cmd)}")
+            # Shared-only policy: do not fallback to static-oriented targets like build_libs.
+            retry_cmd = ["make", "-j1"]
+            print(f"[retry] openssl build failed; retry single-thread shared build: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name == "FFmpeg":
             retry_cmd = ["make", "-j1"]
@@ -2460,6 +2456,12 @@ def _build_once(
             return []
 
         artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+        if (not artifacts) and profile.name == "openssl":
+            jobs = 1 if variant.compiler == "clang" else max(1, os.cpu_count() or 1)
+            retry_cmd = ["make", f"-j{jobs}"]
+            print(f"[retry] openssl shared artifacts missing; rerun make: {' '.join(retry_cmd)}")
+            run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+            artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
         if (not artifacts) and profile.name == "freetype":
             jobs = max(1, os.cpu_count() or 1)
             _ensure_freetype_unix_libtool(profile.repo_dir, env)
