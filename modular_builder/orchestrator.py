@@ -2462,6 +2462,21 @@ def _build_once(
             print(f"[retry] openssl shared artifacts missing; rerun make: {' '.join(retry_cmd)}")
             run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
             artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+        if (not artifacts) and profile.name == "openssl":
+            static_hits: list[str] = []
+            for pat in ("**/libcrypto.a", "**/libssl.a"):
+                for p in sorted(profile.repo_dir.glob(pat)):
+                    if p.is_file():
+                        static_hits.append(str(p.relative_to(profile.repo_dir)))
+                        if len(static_hits) >= 10:
+                            break
+                if len(static_hits) >= 10:
+                    break
+            if static_hits:
+                err = (
+                    "shared artifacts not produced (.so missing) while static archives exist; "
+                    "shared-only policy rejected static outputs: " + ", ".join(static_hits)
+                )
         if (not artifacts) and profile.name == "freetype":
             jobs = max(1, os.cpu_count() or 1)
             _ensure_freetype_unix_libtool(profile.repo_dir, env)
