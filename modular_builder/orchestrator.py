@@ -1983,18 +1983,6 @@ def _build_once(
             retry_cmd = ["make", "build_libs", f"-j{jobs}"]
             print(f"[retry] openssl build failed; trying: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
-        if (not ok) and profile.name == "openssl":
-            err_text = err or ""
-            if ("ld returned 1 exit status" in err_text) or ("file too short" in err_text):
-                print("[retry] openssl shared link failed; forcing static no-shared retry")
-                run_cmd(["make", "clean"], cwd=profile.repo_dir, env=env)
-                cfg_cmd = ["perl", "Configure", "linux-x86_64", "no-shared", "no-asm"]
-                ok, cfg_err = run_cmd(cfg_cmd, cwd=profile.repo_dir, env=env)
-                if ok:
-                    jobs = 1 if variant.compiler == "clang" else max(1, os.cpu_count() or 1)
-                    ok, err = run_cmd(["make", "build_libs", f"-j{jobs}"], cwd=profile.repo_dir, env=env)
-                else:
-                    err = cfg_err or err
         if (not ok) and profile.name == "FFmpeg":
             retry_cmd = ["make", "-j1"]
             print(f"[retry] FFmpeg build failed; retry single-thread: {' '.join(retry_cmd)}")
@@ -2657,9 +2645,9 @@ def _emit_row_outputs(
         if profile.name == "openssl":
             preferred = None
             if row.file.startswith("crypto/"):
-                preferred = next((p for p in cache_files if ("libcrypto.so" in p.name or p.name == "libcrypto.a")), None)
+                preferred = next((p for p in cache_files if "libcrypto.so" in p.name), None)
             elif row.file.startswith("ssl/"):
-                preferred = next((p for p in cache_files if ("libssl.so" in p.name or p.name == "libssl.a")), None)
+                preferred = next((p for p in cache_files if "libssl.so" in p.name), None)
 
             if preferred is None:
                 print(

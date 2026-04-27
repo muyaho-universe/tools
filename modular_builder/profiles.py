@@ -42,14 +42,14 @@ def _openssl_resolver(repo_dir: Path, row: BuildRow, ref_kind: str) -> list[Path
     # Keep both crypto+ssl artifacts in cache even for commit refs.
     # Multiple CVEs can share one commit hash but point to different file domains.
     # If we cache only one side here, later rows can be skipped at emit time.
-    patterns = ["libcrypto.so*", "libssl.so*", "libcrypto.a", "libssl.a"]
+    patterns = ["libcrypto.so*", "libssl.so*"]
     if not ref_kind.startswith("release_"):
         if row.file.startswith("crypto/"):
-            patterns = ["libcrypto.so*", "libcrypto.a", "libssl.so*", "libssl.a"]
+            patterns = ["libcrypto.so*", "libssl.so*"]
         elif row.file.startswith("ssl/"):
-            patterns = ["libssl.so*", "libssl.a", "libcrypto.so*", "libcrypto.a"]
+            patterns = ["libssl.so*", "libcrypto.so*"]
     else:
-        patterns = ["libcrypto.so*", "libssl.so*", "libcrypto.a", "libssl.a"]
+        patterns = ["libcrypto.so*", "libssl.so*"]
     found: list[Path] = []
     for pattern in patterns:
         for p in sorted(repo_dir.glob(f"**/{pattern}")):
