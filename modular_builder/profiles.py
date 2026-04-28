@@ -139,7 +139,7 @@ def build_profiles() -> dict[str, BuildProfile]:
             name="openssl",
             repo_dir=Path(os.getenv("OPENSSL_DIR", "/home/user/openssl")),
             repo_url="https://github.com/openssl/openssl.git",
-            configure_cmd=["perl", "Configure", "linux-x86_64", "shared"],
+            configure_cmd=["perl", "Configure", "linux-x86_64", "shared", "-g", "-O0"],
             pre_steps=[],
             build_cmd=["make"],
             clean_cmd=["make", "clean"],

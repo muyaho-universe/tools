@@ -1518,6 +1518,13 @@ def _append_flag(flags: str, flag: str) -> str:
     return f"{flags} {flag}".strip()
 
 
+def _openssl_debug_configure_args(env: dict[str, str]) -> list[str]:
+    cflags = env.get("CFLAGS", "")
+    m = re.search(r"(?<!\S)-O([0-3szg])(?=\s|$)", cflags)
+    opt = f"-O{m.group(1)}" if m else "-O0"
+    return ["-g", opt]
+
+
 def _build_once(
     profile: BuildProfile,
     row: BuildRow,
@@ -1601,7 +1608,14 @@ def _build_once(
         if profile.configure_cmd:
             if openssl_safe_mode:
                 # Keep shared libraries enabled (.so) while still avoiding fragile asm paths.
-                configure_cmd = ["perl", "Configure", "linux-x86_64", "shared", "no-asm"]
+                configure_cmd = [
+                    "perl",
+                    "Configure",
+                    "linux-x86_64",
+                    "shared",
+                    "no-asm",
+                    *_openssl_debug_configure_args(env),
+                ]
             else:
                 configure_cmd = _render_tokens(profile.configure_cmd, variant)
             if profile.name == "expat":
@@ -2467,10 +2481,12 @@ def _build_once(
             # Retry with ./config shared to force SHLIB settings in legacy trees.
             print("[retry] openssl shared artifacts still missing; reconfigure with ./config shared no-asm")
             run_cmd(["make", "clean"], cwd=profile.repo_dir, env=env)
+            debug_flags = " ".join(_openssl_debug_configure_args(env))
             cfg_cmd = [
                 "bash",
                 "-lc",
-                "if [ -x ./config ]; then ./config shared no-asm; else perl Configure linux-x86_64 shared no-asm; fi",
+                f"if [ -x ./config ]; then ./config shared no-asm {debug_flags}; "
+                f"else perl Configure linux-x86_64 shared no-asm {debug_flags}; fi",
             ]
             cfg_ok, cfg_err = run_cmd(cfg_cmd, cwd=profile.repo_dir, env=env)
             if cfg_ok:
