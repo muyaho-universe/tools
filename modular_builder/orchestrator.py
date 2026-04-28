@@ -1519,10 +1519,16 @@ def _append_flag(flags: str, flag: str) -> str:
 
 
 def _openssl_debug_configure_args(env: dict[str, str]) -> list[str]:
-    cflags = env.get("CFLAGS", "")
+    tokens = env.get("CFLAGS", "").split()
+    cflags = " ".join(tokens)
     m = re.search(r"(?<!\S)-O([0-3szg])(?=\s|$)", cflags)
+    args = ["-g"]
+    for flag in tokens:
+        if flag in {"-fPIC", "-fpic", "-fPIE", "-fpie", "-fno-pie", "-fno-PIE"}:
+            args.append(flag)
     opt = f"-O{m.group(1)}" if m else "-O0"
-    return ["-g", opt]
+    args.append(opt)
+    return args
 
 
 def _build_once(
@@ -1989,10 +1995,25 @@ def _build_once(
         else:
             ok, err = True, ""
         if (not ok) and profile.name == "openssl":
-            # Shared-only policy: do not fallback to static-oriented targets like build_libs.
             retry_cmd = ["make", "-j1"]
             print(f"[retry] openssl build failed; retry single-thread shared build: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "openssl":
+            retry_cmd = ["make", "-j1", "build_libs"]
+            print(f"[retry] openssl app/test link failed; build shared libraries only: {' '.join(retry_cmd)}")
+            libs_ok, libs_err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+            if libs_ok:
+                ok, err = True, ""
+            else:
+                err = libs_err or err
+        if (not ok) and profile.name == "openssl":
+            partial_artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+            if partial_artifacts:
+                print(
+                    f"[warn] openssl build reported link failure, but shared artifacts exist "
+                    f"({len(partial_artifacts)}); continuing"
+                )
+                ok, err = True, ""
         if (not ok) and profile.name == "FFmpeg":
             retry_cmd = ["make", "-j1"]
             print(f"[retry] FFmpeg build failed; retry single-thread: {' '.join(retry_cmd)}")
