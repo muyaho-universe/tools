@@ -1969,8 +1969,9 @@ def _build_once(
         if profile.name == "freetype" and freetype_cmake_built:
             build_cmd = []
         if openssl_safe_mode:
-            # OpenSSL shared-only mode: prefer full make so .so artifacts are materialized.
-            build_cmd = ["make"]
+            # OpenSSL rows only need libcrypto/libssl. Building apps/tests can fail on
+            # old 1.0.x commits after the shared libraries have already been produced.
+            build_cmd = ["make", "-j1", "build_libs"]
         if build_cmd == ["make"]:
             jobs = max(1, os.cpu_count() or 1)
             if profile.name == "openssl" and variant.compiler == "clang":
@@ -1995,17 +1996,37 @@ def _build_once(
         else:
             ok, err = True, ""
         if (not ok) and profile.name == "openssl":
-            retry_cmd = ["make", "-j1"]
-            print(f"[retry] openssl build failed; retry single-thread shared build: {' '.join(retry_cmd)}")
-            ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+            partial_artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
+            if partial_artifacts:
+                print(
+                    f"[warn] openssl build reported failure, but shared artifacts exist "
+                    f"({len(partial_artifacts)}); continuing"
+                )
+                ok, err = True, ""
         if (not ok) and profile.name == "openssl":
+            err_text = err or ""
+            if "member " in err_text and "archive is not an object" in err_text:
+                print("[retry] openssl archive looks stale/corrupt; clean before rebuilding libraries")
+                run_cmd(["make", "clean"], cwd=profile.repo_dir, env=env)
             retry_cmd = ["make", "-j1", "build_libs"]
-            print(f"[retry] openssl app/test link failed; build shared libraries only: {' '.join(retry_cmd)}")
+            print(f"[retry] openssl build failed; build shared libraries only: {' '.join(retry_cmd)}")
             libs_ok, libs_err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
             if libs_ok:
                 ok, err = True, ""
             else:
                 err = libs_err or err
+        if (not ok) and profile.name == "openssl" and "No rule to make target" in (err or ""):
+            retry_cmd = ["make", "-j1", "build_crypto", "build_ssl"]
+            print(f"[retry] openssl build_libs target missing; build crypto/ssl libraries: {' '.join(retry_cmd)}")
+            libs_ok, libs_err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+            if libs_ok:
+                ok, err = True, ""
+            else:
+                err = libs_err or err
+        if (not ok) and profile.name == "openssl":
+            retry_cmd = ["make", "-j1"]
+            print(f"[retry] openssl library build failed; retry legacy full make single-thread: {' '.join(retry_cmd)}")
+            ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name == "openssl":
             partial_artifacts = _resolve_artifacts_for_variant(profile, row, ref_kind, variant)
             if partial_artifacts:
