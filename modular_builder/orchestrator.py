@@ -1521,7 +1521,7 @@ def _append_flag(flags: str, flag: str) -> str:
 def _openssl_debug_configure_args(env: dict[str, str]) -> list[str]:
     tokens = env.get("CFLAGS", "").split()
     cflags = " ".join(tokens)
-    m = re.search(r"(?<!\S)-O([0-3szg])(?=\s|$)", cflags)
+    m = re.search(r"(?<!\S)-O(0|1|2|3|s|fast)(?=\s|$)", cflags)
     args = ["-g"]
     for flag in tokens:
         if flag in {"-fPIC", "-fpic", "-fPIE", "-fpie", "-fno-pie", "-fno-PIE"}:
@@ -2633,7 +2633,7 @@ def _build_once(
 
 def _default_variant(profile: BuildProfile) -> BuildVariant:
     flags = " ".join([profile.env_overrides.get("CFLAGS", ""), profile.env_overrides.get("CXXFLAGS", "")])
-    m = re.search(r"-O([0-3sz])", flags)
+    m = re.search(r"-O(0|1|2|3|s|fast)", flags)
     opt = f"O{m.group(1)}" if m else "O0"
     cc = (profile.env_overrides.get("CC") or "").lower()
     compiler = "clang" if "clang" in cc else "gcc"
@@ -2651,7 +2651,7 @@ def _release_variants() -> list[BuildVariant]:
 
     variants: list[BuildVariant] = []
     for compiler, cc, cxx in [("gcc", gcc, gpp), ("clang", clang, clangpp)]:
-        for opt in ["O0", "O1", "O2", "O3"]:
+        for opt in ["Os", "Ofast"]:# ["O0", "O1", "O2", "O3", "Os", "Ofast"]:
             extra: dict[str, str] = {}
             if compiler == "clang":
                 # Keep binutils consistent with clang, but only pin tools that actually exist.
@@ -2802,7 +2802,7 @@ def _process_releases(profile: BuildProfile, row: BuildRow, ctx: BuildContext) -
     )
 
     variants = _release_variants()
-    print(f"[release-variants] count={len(variants)} (gcc/clang x O0..O3, with -g)")
+    print(f"[release-variants] count={len(variants)} (gcc/clang x O0/O1/O2/O3/Os/Ofast, with -g)")
     tasks: list[tuple[str, str, BuildVariant]] = []
     for tag in tags:
         ref = tag.tag
