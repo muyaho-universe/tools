@@ -2852,11 +2852,25 @@ def _build_once_isolated_worktree(
     wt_dir = (worktree_root / wt_name).resolve()
     wt_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    ok, err = run_cmd(
-        ["git", "worktree", "add", "--detach", "--force", str(wt_dir), ref],
-        cwd=profile.repo_dir,
-        quiet_stdout=False,
-    )
+    def _add_worktree() -> tuple[bool, str]:
+        return run_cmd(
+            ["git", "worktree", "add", "--detach", "--force", str(wt_dir), ref],
+            cwd=profile.repo_dir,
+            quiet_stdout=False,
+        )
+
+    def _prune_worktrees() -> None:
+        run_cmd(["git", "worktree", "prune", "--expire", "now"], cwd=profile.repo_dir, quiet_stdout=False)
+
+    with ctx.lock:
+        if wt_dir.exists():
+            shutil.rmtree(wt_dir, ignore_errors=True)
+        _prune_worktrees()
+        ok, err = _add_worktree()
+        if (not ok) and ("commondir" in (err or "").lower() or "worktrees/" in (err or "").lower()):
+            # Stale metadata from an interrupted prior run can break new worktree creation.
+            _prune_worktrees()
+            ok, err = _add_worktree()
     if not ok:
         _log_failure(ctx, row, kind, "worktree_add", err)
         return None
@@ -2866,7 +2880,9 @@ def _build_once_isolated_worktree(
         cache_files = _build_once(local_profile, row, ref, kind, variant, ctx)
         return kind, variant, cache_files
     finally:
-        run_cmd(["git", "worktree", "remove", "--force", str(wt_dir)], cwd=profile.repo_dir, quiet_stdout=False)
+        with ctx.lock:
+            run_cmd(["git", "worktree", "remove", "--force", str(wt_dir)], cwd=profile.repo_dir, quiet_stdout=False)
+            _prune_worktrees()
         if wt_dir.exists():
             shutil.rmtree(wt_dir, ignore_errors=True)
 
