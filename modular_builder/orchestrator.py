@@ -2651,7 +2651,7 @@ def _release_variants() -> list[BuildVariant]:
 
     variants: list[BuildVariant] = []
     for compiler, cc, cxx in [("gcc", gcc, gpp), ("clang", clang, clangpp)]:
-        for opt in ["Os", "Ofast"]:# ["O0", "O1", "O2", "O3", "Os", "Ofast"]:
+        for opt in ["O0", "O1", "O2", "O3", "Os", "Ofast"]:
             extra: dict[str, str] = {}
             if compiler == "clang":
                 # Keep binutils consistent with clang, but only pin tools that actually exist.
