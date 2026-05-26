@@ -155,7 +155,7 @@ def build_profiles() -> dict[str, BuildProfile]:
             pre_steps=[],
             build_cmd=["make"],
             clean_cmd=["make", "clean"],
-            env_overrides={**base, "CPPFLAGS": "-I/home/user/BinForge/local/libpcap/include", "LDFLAGS": "-L/home/user/BinForge/local/libpcap/lib"},
+            env_overrides=base,
             artifact_globs=["tcpdump", "./tcpdump"],
         ),
         "libxml2": BuildProfile(

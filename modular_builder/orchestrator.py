@@ -12,7 +12,7 @@ from threading import Lock
 
 from .models import BuildRow
 from .profiles import BuildProfile, build_profiles, resolve_artifacts
-from .utils import is_real_binary_or_library, parse_commit_hash, run_cmd
+from .utils import is_real_binary_or_library, parse_commit_hash, resolve_command, run_cmd
 from .versioning import release_tags_in_range
 
 MAX_FAILURE_LOG_LINES = int(os.getenv("MAX_FAILURE_LOG_LINES", "40"))
@@ -274,6 +274,101 @@ def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
         compat_env.get("CXXFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10100000L"
     ).strip()
     return compat_env
+
+
+def _with_system_include_lib_paths(base_env: dict[str, str]) -> dict[str, str]:
+    compat_env = dict(base_env)
+    cpp = compat_env.get("CPPFLAGS", "").strip()
+    ld = compat_env.get("LDFLAGS", "").strip()
+    compat_env["CPPFLAGS"] = f"-I/usr/include -I/usr/include/x86_64-linux-gnu {cpp}".strip()
+    compat_env["LDFLAGS"] = f"-L/usr/lib/x86_64-linux-gnu -L/lib/x86_64-linux-gnu -L/usr/lib64 -L/lib64 {ld}".strip()
+    return compat_env
+
+
+def _pkg_config_output(package: str, flag: str) -> str:
+    if not shutil.which("pkg-config"):
+        return ""
+    try:
+        proc = subprocess.run(
+            ["pkg-config", flag, package],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return (proc.stdout or "").strip()
+
+
+def _tcpdump_compat_env(base_env: dict[str, str]) -> dict[str, str]:
+    compat_env = _with_system_include_lib_paths(base_env)
+    bad_prefix = "/home/user/BinForge/local/libpcap"
+    cpp_tokens = [t for t in compat_env.get("CPPFLAGS", "").split() if bad_prefix not in t]
+    ld_tokens = [t for t in compat_env.get("LDFLAGS", "").split() if bad_prefix not in t]
+    compat_env["CPPFLAGS"] = " ".join(cpp_tokens).strip()
+    compat_env["LDFLAGS"] = " ".join(ld_tokens).strip()
+
+    for pkg in ["libpcap", "pcap"]:
+        cflags = _pkg_config_output(pkg, "--cflags")
+        libs = _pkg_config_output(pkg, "--libs-only-L")
+        if cflags:
+            compat_env["CPPFLAGS"] = f"{cflags} {compat_env.get('CPPFLAGS', '')}".strip()
+        if libs:
+            compat_env["LDFLAGS"] = f"{libs} {compat_env.get('LDFLAGS', '')}".strip()
+        if cflags or libs:
+            break
+    return compat_env
+
+
+def _detect_zlib_for_cmake() -> tuple[str, str]:
+    include_candidates = [
+        Path("/usr/include"),
+        Path("/usr/include/x86_64-linux-gnu"),
+    ]
+    lib_candidates = [
+        Path("/usr/lib/x86_64-linux-gnu/libz.so"),
+        Path("/usr/lib/x86_64-linux-gnu/libz.a"),
+        Path("/lib/x86_64-linux-gnu/libz.so"),
+        Path("/lib/x86_64-linux-gnu/libz.a"),
+        Path("/usr/lib64/libz.so"),
+        Path("/usr/lib64/libz.a"),
+        Path("/usr/lib/libz.so"),
+        Path("/usr/lib/libz.a"),
+    ]
+
+    include_dir = ""
+    lib_path = ""
+    for cand in include_candidates:
+        if (cand / "zlib.h").exists():
+            include_dir = str(cand)
+            break
+    for cand in lib_candidates:
+        if cand.exists():
+            lib_path = str(cand)
+            break
+
+    if not include_dir:
+        pc_cflags = _pkg_config_output("zlib", "--cflags-only-I")
+        for token in pc_cflags.split():
+            if token.startswith("-I"):
+                path = token[2:]
+                if path and Path(path, "zlib.h").exists():
+                    include_dir = path
+                    break
+    if not lib_path:
+        pc_libs = _pkg_config_output("zlib", "--libs-only-L")
+        for token in pc_libs.split():
+            if token.startswith("-L"):
+                for leaf in ["libz.so", "libz.a"]:
+                    cand = Path(token[2:]) / leaf
+                    if cand.exists():
+                        lib_path = str(cand)
+                        break
+                if lib_path:
+                    break
+    return include_dir, lib_path
 
 
 def _looks_like_autoconf_input(path: Path) -> bool:
@@ -1561,6 +1656,8 @@ def _build_once(
     env.pop("GIT_INDEX_FILE", None)
     env.update(profile.env_overrides)
     env.update(variant.env_overrides)
+    if profile.name in {"tcpdump", "libxml2", "exiv2", "openvpn"}:
+        env = _with_system_include_lib_paths(env)
     if ctx.enable_pie:
         if profile.name == "dwg2dxf":
             # Legacy dwg2dxf tags (e.g., 0.5) frequently fail PIE linking due to non-PIE objects.
@@ -1823,6 +1920,34 @@ def _build_once(
                             err = cfg_err or err
                     else:
                         err = patch_err or err
+                if (not ok) and "openssl check failed" in (err or "").lower():
+                    compat_env = _openvpn_compat_openssl_env(env)
+                    compat_retries = [
+                        ["./configure", "--disable-plugin-auth-pam", "--disable-comp-lzo", "--disable-lz4", "--with-crypto-library=openssl"],
+                        ["./configure", "--disable-plugin-auth-pam", "--with-crypto-library=openssl"],
+                    ]
+                    for fallback_cfg in compat_retries:
+                        print(f"[retry] openvpn openssl configure fallback: {' '.join(fallback_cfg)}")
+                        ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=compat_env)
+                        if ok:
+                            err = ""
+                            env.update(compat_env)
+                            break
+                        err = cfg_err or err
+            if (not ok) and profile.name == "tcpdump":
+                compat_env = _tcpdump_compat_env(env)
+                retry_plan = [
+                    ["./configure"],
+                    ["bash", "-lc", "command -v pcap-config >/dev/null 2>&1 && export CPPFLAGS=\"$(pcap-config --cflags) $CPPFLAGS\" && export LDFLAGS=\"$(pcap-config --libs | sed 's/-lpcap//g') $LDFLAGS\"; ./configure"],
+                ]
+                for fallback_cfg in retry_plan:
+                    print(f"[retry] tcpdump configure fallback: {' '.join(fallback_cfg)}")
+                    ok, cfg_err = run_cmd(fallback_cfg, cwd=profile.repo_dir, env=compat_env)
+                    if ok:
+                        err = ""
+                        env.update(compat_env)
+                        break
+                    err = cfg_err or err
             if (not ok) and profile.name == "expat":
                 expat_retries = [
                     ["bash", "-lc", "test -x ./configure && ./configure"],
@@ -2133,6 +2258,30 @@ def _build_once(
                         ok = True
                     else:
                         err = dummy_err or err
+        if (not ok) and profile.name == "libxml2":
+            err_text = err or ""
+            if ("zlib.h" in err_text) or ("ld returned 1 exit status" in err_text):
+                retry_env = _with_system_include_lib_paths(env)
+                retry_env["CFLAGS"] = _append_flag(retry_env.get("CFLAGS", ""), "-fno-pie")
+                retry_env["CXXFLAGS"] = _append_flag(retry_env.get("CXXFLAGS", ""), "-fno-pie")
+                retry_env["LDFLAGS"] = _append_flag(retry_env.get("LDFLAGS", ""), "-no-pie")
+                reconfigure = [
+                    "bash",
+                    "-lc",
+                    "if [ -x ./configure ]; then make clean >/dev/null 2>&1 || true; "
+                    "./configure --without-python --without-lzma --without-zlib || "
+                    "./configure --without-python --without-lzma; fi",
+                ]
+                print(f"[retry] libxml2 dependency/link issue; reconfiguring: {' '.join(reconfigure)}")
+                cfg_ok, cfg_err = run_cmd(reconfigure, cwd=profile.repo_dir, env=retry_env)
+                if cfg_ok:
+                    retry_cmd = ["make", "-j1"]
+                    print(f"[retry] libxml2 rebuilding single-thread: {' '.join(retry_cmd)}")
+                    ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=retry_env)
+                    if ok:
+                        env.update(retry_env)
+                else:
+                    err = cfg_err or err
         if (not ok) and profile.name == "pcf2bdf":
             err_text = err or ""
             if "No targets specified and no makefile found" in err_text:
@@ -2170,6 +2319,52 @@ def _build_once(
                         ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
         if (not ok) and profile.name == "exiv2":
             err_text = err or ""
+            if "Could NOT find ZLIB" in err_text:
+                cmake_build = f"build_{variant.compiler}_{variant.opt}"
+                retry_env = _with_system_include_lib_paths(env)
+                zlib_include, zlib_library = _detect_zlib_for_cmake()
+                forced_cfg = [
+                    "cmake",
+                    "-S",
+                    ".",
+                    "-B",
+                    cmake_build,
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DEXIV2_ENABLE_XMP=OFF",
+                ]
+                if zlib_include and zlib_library:
+                    forced_cfg.extend(
+                        [
+                            f"-DZLIB_INCLUDE_DIR={zlib_include}",
+                            f"-DZLIB_LIBRARY={zlib_library}",
+                        ]
+                    )
+                else:
+                    forced_cfg.append("-DEXIV2_ENABLE_PNG=OFF")
+                print(f"[retry] exiv2 zlib detection issue; retrying configure: {' '.join(forced_cfg)}")
+                ok, cfg_err = run_cmd(forced_cfg, cwd=profile.repo_dir, env=retry_env)
+                if ok:
+                    retry_build = ["cmake", "--build", cmake_build, "-j", str(max(1, os.cpu_count() or 1))]
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=retry_env)
+                else:
+                    err = cfg_err or err
+                    zlib_off_cfg = [
+                        "cmake",
+                        "-S",
+                        ".",
+                        "-B",
+                        cmake_build,
+                        "-DCMAKE_BUILD_TYPE=Release",
+                        "-DEXIV2_ENABLE_XMP=OFF",
+                        "-DEXIV2_ENABLE_PNG=OFF",
+                    ]
+                    print(f"[retry] exiv2 zlib still unavailable; disabling png support: {' '.join(zlib_off_cfg)}")
+                    ok, cfg_err = run_cmd(zlib_off_cfg, cwd=profile.repo_dir, env=retry_env)
+                    if ok:
+                        retry_build = ["cmake", "--build", cmake_build, "-j", str(max(1, os.cpu_count() or 1))]
+                        ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=retry_env)
+                    else:
+                        err = cfg_err or err
             if (
                 "undefined reference to `std::" in err_text
                 or "__gxx_personality_v0" in err_text
@@ -2641,40 +2836,49 @@ def _default_variant(profile: BuildProfile) -> BuildVariant:
 
 
 def _release_variants() -> list[BuildVariant]:
-    gcc = os.getenv("GCC_BIN", "/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-gcc")
-    gpp = os.getenv("GPP_BIN", "/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-g++")
-    clang = os.getenv("CLANG_BIN", "/home/user/BinForge/tools/clang/clang-13.0.1/bin/clang")
-    clangpp = os.getenv("CLANGPP_BIN", "/home/user/BinForge/tools/clang/clang-13.0.1/bin/clang++")
-    llvm_ar = os.getenv("LLVM_AR_BIN", "/usr/bin/llvm-ar")
-    llvm_ranlib = os.getenv("LLVM_RANLIB_BIN", "/usr/bin/llvm-ranlib")
-    llvm_nm = os.getenv("LLVM_NM_BIN", "/usr/bin/llvm-nm")
+    gcc = resolve_command(
+        os.getenv("GCC_BIN", "/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-gcc"),
+        ["gcc", "cc", "clang"],
+    )
+    gpp = resolve_command(
+        os.getenv("GPP_BIN", "/home/user/BinForge/tools/gcc/x86_64-unknown-linux-gnu-9.5.0/bin/x86_64-unknown-linux-gnu-g++"),
+        ["g++", "c++", "clang++"],
+    )
+    clang = resolve_command(
+        os.getenv("CLANG_BIN", "/home/user/BinForge/tools/clang/clang-13.0.1/bin/clang"),
+        ["clang"],
+    )
+    clangpp = resolve_command(
+        os.getenv("CLANGPP_BIN", "/home/user/BinForge/tools/clang/clang-13.0.1/bin/clang++"),
+        ["clang++"],
+    )
+    llvm_ar = resolve_command(os.getenv("LLVM_AR_BIN", "/usr/bin/llvm-ar"), ["llvm-ar", "ar"])
+    llvm_ranlib = resolve_command(os.getenv("LLVM_RANLIB_BIN", "/usr/bin/llvm-ranlib"), ["llvm-ranlib", "ranlib"])
+    llvm_nm = resolve_command(os.getenv("LLVM_NM_BIN", "/usr/bin/llvm-nm"), ["llvm-nm", "nm"])
 
     variants: list[BuildVariant] = []
-    for compiler, cc, cxx in [("gcc", gcc, gpp), ("clang", clang, clangpp)]:
+    toolchains: list[tuple[str, str, str]] = [("gcc", gcc, gpp)]
+    clang_available = bool(clang) and (os.path.isfile(clang) or shutil.which(os.path.basename(clang)))
+    clangpp_available = bool(clangpp) and (os.path.isfile(clangpp) or shutil.which(os.path.basename(clangpp)))
+    if clang_available and clangpp_available:
+        toolchains.append(("clang", clang, clangpp))
+    else:
+        print(
+            "[toolchain-skip] clang toolchain unavailable; "
+            f"skipping clang release variants (cc={clang}, cxx={clangpp})"
+        )
+
+    for compiler, cc, cxx in toolchains:
         for opt in ["O0", "O1", "O2", "O3", "Os", "Ofast"]:
             extra: dict[str, str] = {}
             if compiler == "clang":
                 # Keep binutils consistent with clang, but only pin tools that actually exist.
-                if os.path.isfile(llvm_ar):
+                if llvm_ar and (os.path.isfile(llvm_ar) or shutil.which(os.path.basename(llvm_ar))):
                     extra["AR"] = llvm_ar
-                elif shutil.which("llvm-ar"):
-                    extra["AR"] = "llvm-ar"
-                elif shutil.which("ar"):
-                    extra["AR"] = "ar"
-
-                if os.path.isfile(llvm_ranlib):
+                if llvm_ranlib and (os.path.isfile(llvm_ranlib) or shutil.which(os.path.basename(llvm_ranlib))):
                     extra["RANLIB"] = llvm_ranlib
-                elif shutil.which("llvm-ranlib"):
-                    extra["RANLIB"] = "llvm-ranlib"
-                elif shutil.which("ranlib"):
-                    extra["RANLIB"] = "ranlib"
-
-                if os.path.isfile(llvm_nm):
+                if llvm_nm and (os.path.isfile(llvm_nm) or shutil.which(os.path.basename(llvm_nm))):
                     extra["NM"] = llvm_nm
-                elif shutil.which("llvm-nm"):
-                    extra["NM"] = "llvm-nm"
-                elif shutil.which("nm"):
-                    extra["NM"] = "nm"
             variants.append(
                 BuildVariant(
                     compiler=compiler,

@@ -9,6 +9,29 @@ import time
 from pathlib import Path
 
 
+def resolve_command(preferred: str, fallbacks: list[str] | None = None) -> str:
+    candidates: list[str] = []
+    for raw in [preferred, *(fallbacks or [])]:
+        cand = (raw or "").strip()
+        if not cand or cand in candidates:
+            continue
+        candidates.append(cand)
+
+    for cand in candidates:
+        if os.path.isabs(cand):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+            continue
+        if os.path.sep in cand or (os.path.altsep and os.path.altsep in cand):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+            continue
+        resolved = shutil.which(cand)
+        if resolved:
+            return resolved
+    return candidates[0] if candidates else ""
+
+
 def run_cmd(
     cmd: list[str],
     cwd: Path,
