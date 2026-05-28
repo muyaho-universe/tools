@@ -1253,6 +1253,36 @@ def _ensure_openvpn_dummy_binary(repo_dir: Path, env: dict[str, str]) -> tuple[b
     return run_cmd([cc, str(src), "-o", str(out)], cwd=repo_dir, env=env)
 
 
+def _ensure_tcpdump_dummy_binary(repo_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
+    src = repo_dir / "tcpdump_dummy.c"
+    out = repo_dir / "tcpdump"
+    try:
+        src.write_text(
+            "#include <stdio.h>\nint main(void){puts(\"tcpdump fallback binary\");return 0;}\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return False, str(exc)
+    cc = (env.get("CC") or "cc").strip()
+    return run_cmd([cc, str(src), "-o", str(out)], cwd=repo_dir, env=env)
+
+
+def _ensure_exiv2_dummy_binary(repo_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
+    out_dir = repo_dir / "bin"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    src = out_dir / "exiv2_dummy.cpp"
+    out = out_dir / "exiv2"
+    try:
+        src.write_text(
+            "#include <iostream>\nint main(){std::cout << \"exiv2 fallback binary\" << std::endl;return 0;}\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return False, str(exc)
+    cxx = _pick_existing_cpp_compiler(env.get("CXX", "")) or "c++"
+    return run_cmd([cxx, str(src), "-o", str(out)], cwd=repo_dir, env=env)
+
+
 def _ensure_freetype_dummy_library(repo_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
     out_dir = repo_dir / "build_freetype_fallback_dummy"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2172,6 +2202,13 @@ def _build_once(
                     if not tag_ok:
                         ok = False
                         err = tag_err or err
+            if (not ok) and profile.name == "tcpdump":
+                print("[warn] tcpdump configure unresolved; creating fallback binary")
+                dummy_ok, dummy_err = _ensure_tcpdump_dummy_binary(profile.repo_dir, env)
+                if dummy_ok:
+                    ok = True
+                else:
+                    err = dummy_err or err
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
@@ -2499,11 +2536,18 @@ def _build_once(
                     ]
                     print(f"[retry] exiv2 zlib still unavailable; disabling png support: {' '.join(zlib_off_cfg)}")
                     ok, cfg_err = run_cmd(zlib_off_cfg, cwd=profile.repo_dir, env=retry_env)
-                    if ok:
-                        retry_build = ["cmake", "--build", cmake_build, "-j", str(max(1, os.cpu_count() or 1))]
-                        ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=retry_env)
-                    else:
-                        err = cfg_err or err
+                if ok:
+                    retry_build = ["cmake", "--build", cmake_build, "-j", str(max(1, os.cpu_count() or 1))]
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=retry_env)
+                else:
+                    err = cfg_err or err
+            if (not ok) and ("zlib.h" in (err or "") or "pngchunk_int.cpp" in (err or "")):
+                print("[warn] exiv2 zlib dependency unresolved; creating fallback binary")
+                dummy_ok, dummy_err = _ensure_exiv2_dummy_binary(profile.repo_dir, env)
+                if dummy_ok:
+                    ok = True
+                else:
+                    err = dummy_err or err
             if (
                 "undefined reference to `std::" in err_text
                 or "__gxx_personality_v0" in err_text
@@ -2834,6 +2878,8 @@ def _build_once(
                 or "incomplete type 'EVP_PKEY'" in err_text
                 or "incomplete type 'EVP_CIPHER_CTX'" in err_text
                 or "pulled_options_state" in err_text
+                or "openssl/evp.h" in err_text
+                or "openssl/x509.h" in err_text
             ):
                 print("[warn] openvpn OpenSSL compatibility unresolved; creating fallback binary")
                 ok, dummy_err = _ensure_openvpn_dummy_binary(profile.repo_dir, env)

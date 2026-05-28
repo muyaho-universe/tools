@@ -303,6 +303,7 @@ def build_profiles() -> dict[str, BuildProfile]:
                 "build_{compiler}_{opt}",
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DEXIV2_ENABLE_XMP=OFF",
+                "-DEXIV2_ENABLE_PNG=OFF",
             ],
             pre_steps=[],
             build_cmd=["cmake", "--build", "build_{compiler}_{opt}", "-j"],
