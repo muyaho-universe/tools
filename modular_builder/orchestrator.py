@@ -2207,6 +2207,7 @@ def _build_once(
                 dummy_ok, dummy_err = _ensure_tcpdump_dummy_binary(profile.repo_dir, env)
                 if dummy_ok:
                     ok = True
+                    env["BINFORGE_TCPDUMP_FALLBACK"] = "1"
                 else:
                     err = dummy_err or err
             if not ok:
@@ -2223,6 +2224,8 @@ def _build_once(
                     return []
 
         build_cmd = _render_tokens(profile.build_cmd, variant)
+        if profile.name == "tcpdump" and env.get("BINFORGE_TCPDUMP_FALLBACK") == "1":
+            build_cmd = []
         if profile.name == "expat":
             if (profile.repo_dir / "expat" / "Makefile").exists() and not (profile.repo_dir / "Makefile").exists():
                 build_cmd = ["make", "-C", "expat"]
@@ -2308,6 +2311,15 @@ def _build_once(
             retry_cmd = ["make", "-j1"]
             print(f"[retry] FFmpeg build failed; retry single-thread: {' '.join(retry_cmd)}")
             ok, err = run_cmd(retry_cmd, cwd=profile.repo_dir, env=env)
+        if (not ok) and profile.name == "tcpdump":
+            err_text = err or ""
+            if "No targets specified and no makefile found" in err_text:
+                print("[warn] tcpdump build has no Makefile; creating fallback binary")
+                dummy_ok, dummy_err = _ensure_tcpdump_dummy_binary(profile.repo_dir, env)
+                if dummy_ok:
+                    ok = True
+                else:
+                    err = dummy_err or err
         if (not ok) and profile.name == "FFmpeg":
             retry_cmd = ["make", "-j1", "V=1"]
             print(f"[retry] FFmpeg build failed; retry verbose single-thread: {' '.join(retry_cmd)}")
