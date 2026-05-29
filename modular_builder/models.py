@@ -46,9 +46,10 @@ class BuildRow:
         return refs
 
     def has_release_window(self) -> bool:
-        return bool(self.bug_start and self.patch_end)
+        start = self.bug_start or self.patch_start
+        return bool(start and self.patch_end)
 
     def release_window(self) -> Optional[tuple[str, str]]:
         if not self.has_release_window():
             return None
-        return self.bug_start, self.patch_end
+        return (self.bug_start or self.patch_start), self.patch_end
