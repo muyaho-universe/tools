@@ -13,6 +13,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--csv", default="all_in_one.csv", help="Input CSV path")
     p.add_argument("--output", default="/home/user/all_in_one", help="Output directory")
     p.add_argument("--only-project", default="", help="Process only one project name")
+    p.add_argument("--only-cve", default="", help="Process only one CVE ID")
     p.add_argument(
         "--mode",
         choices=["all", "commits", "releases"],
@@ -32,6 +33,7 @@ def main() -> None:
     print(
         f"[start] csv={args.csv} output={args.output} mode={args.mode} "
         f"only_project={args.only_project or 'ALL'} "
+        f"only_cve={args.only_cve or 'ALL'} "
         f"release_workers={args.parallel_workers} project_workers={args.project_workers} "
         f"pie={'on' if args.pie else 'off'}"
     )
@@ -39,6 +41,7 @@ def main() -> None:
         csv_path=args.csv,
         output_root=args.output,
         only_project=args.only_project,
+        only_cve=args.only_cve,
         mode=args.mode,
         clone_missing=not args.no_clone,
         parallel_workers=args.parallel_workers,

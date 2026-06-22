@@ -1750,6 +1750,26 @@ def _openssl_debug_configure_args(env: dict[str, str]) -> list[str]:
     return args
 
 
+def _openssl_configure_args(env: dict[str, str], row: BuildRow) -> list[str]:
+    # CVE-2016-2176 targets X509_NAME_oneline's EBCDIC-specific path.
+    extra = ["-DCHARSET_EBCDIC"] if row.cve == "CVE-2016-2176" else []
+    return [
+        "perl",
+        "Configure",
+        "linux-x86_64",
+        "shared",
+        "no-asm",
+        *_openssl_debug_configure_args(env),
+        *extra,
+    ]
+
+
+def _cache_variant_key(profile: BuildProfile, row: BuildRow, variant: BuildVariant) -> str:
+    if profile.name == "openssl" and row.cve == "CVE-2016-2176":
+        return f"{variant.key}_ebcdic"
+    return variant.key
+
+
 def _build_once(
     profile: BuildProfile,
     row: BuildRow,
@@ -1762,8 +1782,9 @@ def _build_once(
         f"[build-start] project={profile.name} cve={row.cve} ref_kind={ref_kind} "
         f"ref={ref} variant={variant.key}"
     )
-    cache_key = (profile.name, ref, variant.key)
-    cache_dir = ctx.output_root / "_cache" / profile.name / ref / variant.key
+    cache_variant_key = _cache_variant_key(profile, row, variant)
+    cache_key = (profile.name, ref, cache_variant_key)
+    cache_dir = ctx.output_root / "_cache" / profile.name / ref / cache_variant_key
     cached_files = [p for p in cache_dir.iterdir() if p.is_file()] if cache_dir.exists() else []
     if cached_files:
         print(f"[cache-hit] project={profile.name} ref={ref} variant={variant.key}")
@@ -1835,14 +1856,7 @@ def _build_once(
         if profile.configure_cmd:
             if openssl_safe_mode:
                 # Keep shared libraries enabled (.so) while still avoiding fragile asm paths.
-                configure_cmd = [
-                    "perl",
-                    "Configure",
-                    "linux-x86_64",
-                    "shared",
-                    "no-asm",
-                    *_openssl_debug_configure_args(env),
-                ]
+                configure_cmd = _openssl_configure_args(env, row)
             else:
                 configure_cmd = _render_tokens(profile.configure_cmd, variant)
             if profile.name == "expat":
@@ -3325,6 +3339,7 @@ def run_pipeline(
     csv_path: str,
     output_root: str,
     only_project: str = "",
+    only_cve: str = "",
     mode: str = "all",
     clone_missing: bool = True,
     parallel_workers: int = 1,
@@ -3352,6 +3367,8 @@ def run_pipeline(
             if not row.project:
                 continue
             if only_project and row.project != only_project:
+                continue
+            if only_cve and row.cve != only_cve:
                 continue
             grouped_rows.setdefault(row.project, []).append(row)
 
