@@ -6,11 +6,14 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
 
-CSV_PATH = Path("/home/user/tools/tcpdump_version.csv")
-REPO_PATH = Path("/home/user/tcpdump")
-OUTPUT_PATH = Path("/home/user/tools/tcpdump_version_filled.csv")
+BASE_DIR = Path(__file__).resolve().parent
+CSV_PATH = BASE_DIR / "tcpdump_version.csv"
+REPO_PATH = BASE_DIR / "tcpdump"
+OUTPUT_PATH = BASE_DIR / "tcpdump_version_filled.csv"
 
 GITHUB_COMMIT_PREFIX = "https://github.com/the-tcpdump-group/tcpdump/commit/"
+TARGET_MAJOR = 4
+TARGET_MINOR = 9
 
 CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}")
 SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
@@ -23,6 +26,12 @@ def run_git(args: List[str], check: bool = True) -> str:
     if check and p.returncode != 0:
         raise RuntimeError(f"git failed: {' '.join(cmd)}\n{p.stderr}")
     return p.stdout.strip()
+
+
+def git_ok(args: List[str]) -> bool:
+    cmd = ["git", "-C", str(REPO_PATH)] + args
+    p = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+    return p.returncode == 0
 
 
 def git_lines(args: List[str], check: bool = True) -> List[str]:
@@ -92,6 +101,37 @@ def sort_release_tags(tags: List[str]) -> List[str]:
 ALL_RELEASE_TAGS = sort_release_tags(list_release_tags())
 
 
+def is_target_release_tag(tag: str) -> bool:
+    parsed = parse_release_tag(tag)
+    if parsed is None:
+        return False
+    major, minor, _, _ = parsed
+    return major == TARGET_MAJOR and minor == TARGET_MINOR
+
+
+def is_499_release_tag(tag: str) -> bool:
+    parsed = parse_release_tag(tag)
+    if parsed is None:
+        return False
+    major, minor, _, _ = parsed
+    return major == 4 and minor == 99
+
+
+def target_release_tags() -> List[str]:
+    tags: List[str] = []
+    for t in ALL_RELEASE_TAGS:
+        parsed = parse_release_tag(t)
+        if parsed is None:
+            continue
+        if not is_target_release_tag(t):
+            continue
+        _, _, _, suffix = parsed
+        if suffix:
+            continue
+        tags.append(t)
+    return sort_release_tags(tags)
+
+
 def tags_containing(commit: str) -> List[str]:
     return sort_release_tags(git_lines(["tag", "--contains", commit], check=False))
 
@@ -122,20 +162,22 @@ def commit_touches_file(commit: str, file_name: str) -> bool:
     return False
 
 
-def score_candidate(commit: str, row_file: str, row_func: str, cve: str) -> Tuple[int, int, int]:
+def score_candidate(commit: str, row_file: str, row_func: str, cve: str) -> Tuple[int, int, int, int]:
     """
     Higher is better.
     Priority:
       1) touches target file
-      2) contains 4.99-related release tags
+      2) contains target release series tags (default: 4.9.x)
       3) exact CVE appears in subject
+      4) avoid 4.99-only style picks when tie-breaking
     """
     tags = tags_containing(commit)
     touches = 1 if commit_touches_file(commit, row_file) else 0
-    has_499 = 1 if any(t.startswith("tcpdump-4.99") for t in tags) else 0
+    has_target = 1 if any(is_target_release_tag(t) for t in tags) else 0
     subj = commit_subject(commit)
     exact_cve = 1 if cve in subj else 0
-    return (touches, has_499, exact_cve)
+    has_499 = 1 if any(is_499_release_tag(t) for t in tags) else 0
+    return (touches, has_target, exact_cve, -has_499)
 
 
 def find_patch_commit(cve: str, row_file: str, row_func: str) -> Optional[str]:
@@ -143,7 +185,7 @@ def find_patch_commit(cve: str, row_file: str, row_func: str) -> Optional[str]:
     Main strategy:
       - search all commits whose subject matches the CVE
       - prefer commits touching the row's file
-      - prefer commits contained in 4.99 tags
+      - if available, restrict to target release series (default: 4.9.x)
     """
     lines = git_lines(
         ["log", "--all", "--format=%H\t%s", f"--grep={cve}"],
@@ -160,6 +202,14 @@ def find_patch_commit(cve: str, row_file: str, row_func: str) -> Optional[str]:
     if not candidates:
         return None
 
+    candidates_with_target = []
+    for sha, subj in candidates:
+        tags = tags_containing(sha)
+        if any(is_target_release_tag(t) for t in tags):
+            candidates_with_target.append((sha, subj))
+    if candidates_with_target:
+        candidates = candidates_with_target
+
     ranked = sorted(
         candidates,
         key=lambda x: score_candidate(x[0], row_file, row_func, cve),
@@ -171,13 +221,34 @@ def find_patch_commit(cve: str, row_file: str, row_func: str) -> Optional[str]:
 
 def release_tags_for_affected(ex_patch: str, patch: str) -> List[str]:
     """
-    Affected tags = tags that contain ex_patch but do not contain patch.
+    Affected target releases are versions before the first target release
+    that contains the patch.
     """
-    ex_tags = set(tags_containing(ex_patch))
-    patch_tags = set(tags_containing(patch))
-    affected = sorted(ex_tags - patch_tags)
-    affected = [t for t in affected if parse_release_tag(t) is not None]
-    return sort_release_tags(affected)
+    targets = target_release_tags()
+    if not targets:
+        return []
+
+    fixed_tags = [t for t in targets if git_ok(["merge-base", "--is-ancestor", patch, t])]
+    if not fixed_tags:
+        return []
+
+    first_fixed = fixed_tags[0]
+    affected: List[str] = []
+    for t in targets:
+        if t == first_fixed:
+            break
+        affected.append(t)
+    return affected
+
+
+def release_tags_for_patched(patch: str) -> List[str]:
+    """
+    Patched target releases are versions that contain the patch commit.
+    """
+    targets = target_release_tags()
+    if not targets:
+        return []
+    return [t for t in targets if git_ok(["merge-base", "--is-ancestor", patch, t])]
 
 
 def compress_tags(tags: List[str]) -> str:
@@ -227,7 +298,7 @@ def process_csv():
         rows = list(reader)
         fieldnames = reader.fieldnames or []
 
-    extra_cols = ["Auto note"]
+    extra_cols = ["Patched", "Auto note"]
     for col in extra_cols:
         if col not in fieldnames:
             fieldnames.append(col)
@@ -262,6 +333,8 @@ def process_csv():
         # 4) affected 계산
         affected_tags = release_tags_for_affected(ex_patch, patch)
         row["Affected"] = compress_tags(affected_tags)
+        patched_tags = release_tags_for_patched(patch)
+        row["Patched"] = compress_tags(patched_tags)
 
         # 5) BIC는 비어 있을 때만 heuristic
         if is_empty(row.get("BIC", "")):
@@ -288,6 +361,10 @@ def process_csv():
             notes.append("affected_tags=" + ",".join(t.replace("tcpdump-", "") for t in affected_tags))
         else:
             notes.append("affected_tags=<none>")
+        if patched_tags:
+            notes.append("patched_tags=" + ",".join(t.replace("tcpdump-", "") for t in patched_tags))
+        else:
+            notes.append("patched_tags=<none>")
 
         row["Auto note"] = " | ".join(notes)
 
