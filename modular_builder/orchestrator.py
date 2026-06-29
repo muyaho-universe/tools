@@ -18,6 +18,7 @@ from .utils import is_real_binary_or_library, parse_commit_hash, resolve_command
 from .versioning import release_tags_in_range
 
 MAX_FAILURE_LOG_LINES = int(os.getenv("MAX_FAILURE_LOG_LINES", "40"))
+_TCPDUMP_LIBPCAP_LOCK = Lock()
 
 
 @dataclass
@@ -488,6 +489,108 @@ def _tcpdump_compat_env(base_env: dict[str, str]) -> dict[str, str]:
     compat_env["ac_cv_func_pcap_loop"] = "yes"
     compat_env["ac_cv_lib_pcap_pcap_loop"] = "yes"
     return compat_env
+
+
+def _has_libpcap_prefix(prefix: Path) -> bool:
+    include_dir = prefix / "include"
+    lib_dirs = [prefix / "lib", prefix / "lib64"]
+    header_ok = (include_dir / "pcap.h").exists() or (include_dir / "pcap" / "pcap.h").exists()
+    lib_ok = any((lib_dir / name).exists() for lib_dir in lib_dirs for name in ["libpcap.so", "libpcap.a"])
+    return header_ok and lib_ok
+
+
+def _apply_libpcap_prefix(env: dict[str, str], prefix: Path) -> dict[str, str]:
+    compat_env = dict(env)
+    include_dir = prefix / "include"
+    lib_dir = prefix / "lib"
+    lib64_dir = prefix / "lib64"
+    lib_tokens = [f"-L{p}" for p in [lib_dir, lib64_dir] if p.exists()]
+    _prepend_env_tokens(compat_env, "CPPFLAGS", [f"-I{include_dir}"])
+    _prepend_env_tokens(compat_env, "CFLAGS", [f"-I{include_dir}"])
+    if lib_tokens:
+        _prepend_env_tokens(compat_env, "LDFLAGS", lib_tokens)
+    compat_env["LIBPCAP_CFLAGS"] = f"-I{include_dir}"
+    compat_env["LIBPCAP_LIBS"] = " ".join([*lib_tokens, "-lpcap"]).strip()
+    compat_env["PKG_CONFIG_PATH"] = ":".join(
+        str(p) for p in [lib_dir / "pkgconfig", lib64_dir / "pkgconfig"] if p.exists()
+    ) + ((":" + compat_env.get("PKG_CONFIG_PATH", "")) if compat_env.get("PKG_CONFIG_PATH") else "")
+    pcap_config = prefix / "bin" / "pcap-config"
+    if pcap_config.exists():
+        compat_env["PCAP_CONFIG"] = str(pcap_config)
+    ld_lib = compat_env.get("LD_LIBRARY_PATH", "").strip()
+    compat_env["LD_LIBRARY_PATH"] = ":".join(str(p) for p in [lib_dir, lib64_dir] if p.exists())
+    if ld_lib:
+        compat_env["LD_LIBRARY_PATH"] = f"{compat_env['LD_LIBRARY_PATH']}:{ld_lib}".strip(":")
+    _remove_env_tokens(compat_env, "LIBS", {"-lpcap"})
+    return compat_env
+
+
+def _ensure_tcpdump_libpcap_dependency(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, dict[str, str], str]:
+    prefixes = [Path("/home/user/BinForge/local/libpcap"), profile.repo_dir.parent / "libpcap-install"]
+    if os.getenv("LIBPCAP_PREFIX"):
+        prefixes.insert(0, Path(os.getenv("LIBPCAP_PREFIX", "")))
+    for prefix in prefixes:
+        if _has_libpcap_prefix(prefix):
+            print(f"[tcpdump-fix] using libpcap prefix: {prefix}")
+            return True, _apply_libpcap_prefix(env, prefix), ""
+
+    src_dir = Path(os.getenv("LIBPCAP_DIR", str(profile.repo_dir.parent / "libpcap")))
+    prefix = Path(os.getenv("LIBPCAP_PREFIX", str(profile.repo_dir.parent / "libpcap-install")))
+    with _TCPDUMP_LIBPCAP_LOCK:
+        if _has_libpcap_prefix(prefix):
+            print(f"[tcpdump-fix] using libpcap prefix: {prefix}")
+            return True, _apply_libpcap_prefix(env, prefix), ""
+
+        if not src_dir.exists():
+            ref = os.getenv("LIBPCAP_REF", "libpcap-1.9.1")
+            ok, err = run_cmd(
+                ["git", "clone", "--depth", "1", "--branch", ref, "https://github.com/the-tcpdump-group/libpcap.git", str(src_dir)],
+                cwd=profile.repo_dir.parent,
+                quiet_stdout=False,
+            )
+            if not ok:
+                ok, err = run_cmd(
+                    ["git", "clone", "https://github.com/the-tcpdump-group/libpcap.git", str(src_dir)],
+                    cwd=profile.repo_dir.parent,
+                    quiet_stdout=False,
+                )
+                if not ok:
+                    return False, env, err
+
+        dep_env = dict(env)
+        if (src_dir / ".git").exists() and os.getenv("LIBPCAP_REF"):
+            ref = os.getenv("LIBPCAP_REF", "")
+            ok, err = run_cmd(["git", "fetch", "--tags"], cwd=src_dir, env=dep_env)
+            if not ok:
+                return False, env, err
+            ok, err = run_cmd(["git", "checkout", "-f", ref], cwd=src_dir, env=dep_env)
+            if not ok:
+                return False, env, err
+
+        configure = src_dir / "configure"
+        if not configure.exists() and (src_dir / "autogen.sh").exists():
+            ok, err = run_cmd(["sh", "./autogen.sh"], cwd=src_dir, env=dep_env)
+            if not ok:
+                return False, env, err
+        if not configure.exists():
+            return False, env, f"libpcap configure not found: {configure}"
+
+        prefix.mkdir(parents=True, exist_ok=True)
+        run_cmd(["make", "distclean"], cwd=src_dir, env=dep_env)
+        ok, err = run_cmd(["./configure", f"--prefix={prefix}"], cwd=src_dir, env=dep_env)
+        if not ok:
+            return False, env, err
+        ok, err = run_cmd(["make", f"-j{max(1, os.cpu_count() or 1)}"], cwd=src_dir, env=dep_env)
+        if not ok:
+            return False, env, err
+        ok, err = run_cmd(["make", "install"], cwd=src_dir, env=dep_env)
+        if not ok:
+            return False, env, err
+        if not _has_libpcap_prefix(prefix):
+            return False, env, f"libpcap build completed but no usable headers/library found under {prefix}"
+
+    print(f"[tcpdump-fix] built libpcap prefix: {prefix}")
+    return True, _apply_libpcap_prefix(env, prefix), ""
 
 
 def _detect_zlib_for_cmake() -> tuple[str, str]:
@@ -1680,6 +1783,11 @@ def _build_once(
         if not ok:
             _log_failure(ctx, row, ref_kind, "pre_step", err)
             return []
+        if profile.name == "tcpdump":
+            ok, env, err = _ensure_tcpdump_libpcap_dependency(profile, env)
+            if not ok:
+                _log_failure(ctx, row, ref_kind, "configure", err)
+                return []
 
         if profile.configure_cmd:
             if openssl_safe_mode:
