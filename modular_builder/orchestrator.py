@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
@@ -1411,6 +1412,118 @@ def _pick_existing_cpp_compiler(preferred: str) -> str:
     return cand or "c++"
 
 
+def _compiler_can_link(cc: str, env: dict[str, str], cflags: str = "", ldflags: str = "") -> tuple[bool, str]:
+    if not cc:
+        return False, "empty compiler"
+    with tempfile.TemporaryDirectory(prefix="binforge_cc_probe_") as tmp:
+        tmp_dir = Path(tmp)
+        src = tmp_dir / "probe.c"
+        out = tmp_dir / "probe"
+        src.write_text("int main(void){return 0;}\n", encoding="ascii")
+        cmd = [cc, *cflags.split(), str(src), "-o", str(out), *ldflags.split()]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=tmp,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            return False, str(exc)
+        if proc.returncode == 0 and out.exists():
+            return True, ""
+        err = (proc.stderr or proc.stdout or "").strip()
+        return False, err or f"compiler exited with {proc.returncode}"
+
+
+def _linkable_c_compiler(preferred: str, family: str, env: dict[str, str]) -> tuple[str, str]:
+    candidates: list[str] = []
+    if preferred:
+        candidates.append(preferred)
+    if family == "clang":
+        candidates.extend(["clang"])
+    else:
+        candidates.extend(["gcc", "cc"])
+
+    seen: set[str] = set()
+    for cand in candidates:
+        resolved = cand
+        if not os.path.isabs(cand):
+            resolved = shutil.which(cand) or cand
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        ok, _ = _compiler_can_link(resolved, env, env.get("CFLAGS", ""), env.get("LDFLAGS", ""))
+        if ok:
+            return resolved, ""
+
+    ok, err = _compiler_can_link(preferred, env, env.get("CFLAGS", ""), env.get("LDFLAGS", ""))
+    return "", err
+
+
+def _linkable_cxx_compiler(preferred: str, family: str) -> str:
+    candidates: list[str] = []
+    if preferred:
+        candidates.append(preferred)
+    if family == "clang":
+        candidates.extend(["clang++"])
+    else:
+        candidates.extend(["g++", "c++"])
+    for cand in candidates:
+        if os.path.isabs(cand):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+            continue
+        resolved = shutil.which(cand)
+        if resolved:
+            return resolved
+    return preferred or ("clang++" if family == "clang" else "g++")
+
+
+def _ensure_linkable_c_compiler(env: dict[str, str], variant: BuildVariant, project: str) -> None:
+    cc = env.get("CC", "").strip()
+    ok, err = _compiler_can_link(cc, env, env.get("CFLAGS", ""), env.get("LDFLAGS", ""))
+    if ok:
+        return
+
+    fallback, fallback_err = _linkable_c_compiler(cc, variant.compiler, env)
+    if fallback:
+        old_cxx = env.get("CXX", "").strip()
+        env["CC"] = fallback
+        env["CXX"] = _linkable_cxx_compiler(old_cxx, variant.compiler)
+        print(
+            f"[toolchain-fix] project={project} variant={variant.key} "
+            f"compiler could not link; switched CC {cc or '<empty>'} -> {fallback}"
+        )
+        if err:
+            print(f"[toolchain-fix] original link failure: {_short_error(err)}")
+        return
+
+    print(
+        f"[toolchain-warn] project={project} variant={variant.key} "
+        f"no linkable compiler fallback found: {_short_error(fallback_err or err)}"
+    )
+
+
+def _append_config_log_tail(err: str, repo_dir: Path) -> str:
+    config_log = repo_dir / "config.log"
+    if not config_log.exists():
+        return err
+    try:
+        text = config_log.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return err
+    tail = text[-6000:].strip()
+    if not tail:
+        return err
+    if "[config.log-tail]" in err:
+        return err
+    return f"{err}\n[config.log-tail]\n{tail}".strip()
+
+
 def _debug_artifact_candidates(profile: BuildProfile, variant: BuildVariant) -> None:
     print(f"[artifact-debug] project={profile.name} variant={variant.key}")
     sample_patterns = ["**/*.so*", "**/*.a", "**/openssl", "**/tcpdump", "**/openvpn", "**/exiv2"]
@@ -1537,6 +1650,8 @@ def _build_once(
         env["CXXFLAGS"] = (
             env.get("CXXFLAGS", "") + " -Wno-error -Wno-cpp -Wno-error=cpp -Wno-error=pedantic -Wno-pedantic"
         ).strip()
+    if profile.name in {"tcpdump", "openvpn"}:
+        _ensure_linkable_c_compiler(env, variant, profile.name)
     openssl_safe_mode = profile.name == "openssl"
     freetype_cmake_built = False
 
@@ -1911,6 +2026,7 @@ def _build_once(
             if (not ok) and profile.name == "tcpdump":
                 print("[warn] tcpdump configure unresolved; real-build-only mode keeps this as failure")
             if not ok:
+                err = _append_config_log_tail(err, profile.repo_dir)
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
             if profile.name in {"lou_trace", "lou_checktable", "lou_translate"}:
@@ -2713,13 +2829,42 @@ def _release_variants() -> list[BuildVariant]:
     llvm_ar = resolve_command(os.getenv("LLVM_AR_BIN", "/usr/bin/llvm-ar"), ["llvm-ar", "ar"])
     llvm_ranlib = resolve_command(os.getenv("LLVM_RANLIB_BIN", "/usr/bin/llvm-ranlib"), ["llvm-ranlib", "ranlib"])
     llvm_nm = resolve_command(os.getenv("LLVM_NM_BIN", "/usr/bin/llvm-nm"), ["llvm-nm", "nm"])
+    probe_env = os.environ.copy()
+    gcc_probe_env = {
+        **probe_env,
+        "CC": gcc,
+        "CXX": gpp,
+        "CFLAGS": "-O0 -g",
+        "CXXFLAGS": "-O0 -g",
+    }
+    linkable_gcc, gcc_err = _linkable_c_compiler(gcc, "gcc", gcc_probe_env)
+    if linkable_gcc:
+        if linkable_gcc != gcc:
+            print(f"[toolchain-fix] release gcc compiler switched {gcc} -> {linkable_gcc}")
+        gcc = linkable_gcc
+        gpp = _linkable_cxx_compiler(gpp, "gcc")
+    else:
+        print(f"[toolchain-warn] gcc release compiler is not linkable: {_short_error(gcc_err)}")
 
     variants: list[BuildVariant] = []
     toolchains: list[tuple[str, str, str]] = [("gcc", gcc, gpp)]
     clang_available = bool(clang) and (os.path.isfile(clang) or shutil.which(os.path.basename(clang)))
     clangpp_available = bool(clangpp) and (os.path.isfile(clangpp) or shutil.which(os.path.basename(clangpp)))
     if clang_available and clangpp_available:
-        toolchains.append(("clang", clang, clangpp))
+        clang_probe_env = {
+            **probe_env,
+            "CC": clang,
+            "CXX": clangpp,
+            "CFLAGS": "-O0 -g",
+            "CXXFLAGS": "-O0 -g",
+        }
+        linkable_clang, clang_err = _linkable_c_compiler(clang, "clang", clang_probe_env)
+        if linkable_clang:
+            if linkable_clang != clang:
+                print(f"[toolchain-fix] release clang compiler switched {clang} -> {linkable_clang}")
+            toolchains.append(("clang", linkable_clang, _linkable_cxx_compiler(clangpp, "clang")))
+        else:
+            print(f"[toolchain-skip] clang toolchain cannot link executables: {_short_error(clang_err)}")
     else:
         print(
             "[toolchain-skip] clang toolchain unavailable; "
