@@ -232,6 +232,40 @@ def _detect_openssl_legacy_prefix() -> Path | None:
     return None
 
 
+def _prepend_env_tokens(env: dict[str, str], key: str, tokens: list[str]) -> None:
+    existing = env.get(key, "").split()
+    merged: list[str] = []
+    for token in [*tokens, *existing]:
+        if token and token not in merged:
+            merged.append(token)
+    env[key] = " ".join(merged).strip()
+
+
+def _filter_path_entries(value: str, blocked_parts: tuple[str, ...]) -> str:
+    entries = []
+    for entry in value.split(":"):
+        if not entry:
+            continue
+        if any(part in entry for part in blocked_parts):
+            continue
+        entries.append(entry)
+    return ":".join(entries)
+
+
+def _existing_include_flag(header_relpath: str, candidates: list[Path]) -> str:
+    for include_dir in candidates:
+        if (include_dir / header_relpath).exists():
+            return f"-I{include_dir}"
+    return ""
+
+
+def _existing_library_dir_flag(names: list[str], candidates: list[Path]) -> str:
+    for lib_dir in candidates:
+        if any((lib_dir / name).exists() for name in names):
+            return f"-L{lib_dir}"
+    return ""
+
+
 def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
     compat_env = dict(base_env)
     # Drop forced /usr/local OpenSSL include/lib paths; many environments keep OpenSSL 3.x there.
@@ -239,6 +273,10 @@ def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
     ld_tokens = [t for t in compat_env.get("LDFLAGS", "").split() if "/usr/local/lib" not in t and "/usr/local/lib64" not in t]
     compat_env["CPPFLAGS"] = " ".join(cpp_tokens).strip()
     compat_env["LDFLAGS"] = " ".join(ld_tokens).strip()
+    compat_env["PKG_CONFIG_PATH"] = _filter_path_entries(
+        compat_env.get("PKG_CONFIG_PATH", ""),
+        ("/usr/local/lib/pkgconfig", "/usr/local/lib64/pkgconfig", "/usr/local/share/pkgconfig"),
+    )
 
     legacy_prefix = _detect_openssl_legacy_prefix()
     if legacy_prefix:
@@ -256,20 +294,52 @@ def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
         print(f"[openvpn-fix] using legacy OpenSSL prefix: {legacy_prefix}")
     else:
         print("[openvpn-fix] legacy OpenSSL prefix not found; retrying without /usr/local OpenSSL paths")
+    header_flag = _existing_include_flag(
+        "openssl/evp.h",
+        [
+            Path("/usr/include"),
+            Path("/usr/include/x86_64-linux-gnu"),
+            Path("/opt/openssl/include"),
+            Path("/opt/openssl-1.1/include"),
+        ],
+    )
+    lib_flag = _existing_library_dir_flag(
+        ["libssl.so", "libssl.a", "libcrypto.so", "libcrypto.a"],
+        [
+            Path("/usr/lib/x86_64-linux-gnu"),
+            Path("/lib/x86_64-linux-gnu"),
+            Path("/usr/lib64"),
+            Path("/lib64"),
+            Path("/opt/openssl/lib"),
+            Path("/opt/openssl-1.1/lib"),
+        ],
+    )
+    if header_flag:
+        _prepend_env_tokens(compat_env, "CPPFLAGS", [header_flag])
+        _prepend_env_tokens(compat_env, "CFLAGS", [header_flag])
+        compat_env["OPENSSL_CFLAGS"] = header_flag
+    if lib_flag:
+        _prepend_env_tokens(compat_env, "LDFLAGS", [lib_flag])
     openssl_cflags = _pkg_config_output("openssl", "--cflags")
     openssl_libs = _pkg_config_output("openssl", "--libs")
     if openssl_cflags:
-        compat_env["CPPFLAGS"] = f"{openssl_cflags} {compat_env.get('CPPFLAGS', '')}".strip()
+        _prepend_env_tokens(compat_env, "CPPFLAGS", openssl_cflags.split())
+        _prepend_env_tokens(compat_env, "CFLAGS", openssl_cflags.split())
         compat_env["OPENSSL_CFLAGS"] = openssl_cflags
     if openssl_libs:
         ld_flags = " ".join(tok for tok in openssl_libs.split() if tok.startswith("-L"))
         link_libs = " ".join(tok for tok in openssl_libs.split() if not tok.startswith("-L"))
         if ld_flags:
-            compat_env["LDFLAGS"] = f"{ld_flags} {compat_env.get('LDFLAGS', '')}".strip()
+            _prepend_env_tokens(compat_env, "LDFLAGS", ld_flags.split())
         if link_libs:
-            compat_env["LIBS"] = f"{link_libs} {compat_env.get('LIBS', '')}".strip()
+            _prepend_env_tokens(compat_env, "LIBS", link_libs.split())
             compat_env["OPENSSL_LIBS"] = link_libs
+    else:
+        _prepend_env_tokens(compat_env, "LIBS", ["-lssl", "-lcrypto"])
+        compat_env.setdefault("OPENSSL_LIBS", "-lssl -lcrypto")
     compat_env["ac_cv_header_openssl_ssl_h"] = "yes"
+    compat_env["ac_cv_header_openssl_evp_h"] = "yes"
+    compat_env["ac_cv_header_openssl_x509_h"] = "yes"
     compat_env["ac_cv_lib_ssl_SSL_new"] = "yes"
     compat_env["ac_cv_lib_crypto_EVP_CIPHER_CTX_new"] = "yes"
     compat_env["CFLAGS"] = (
@@ -314,20 +384,57 @@ def _tcpdump_compat_env(base_env: dict[str, str]) -> dict[str, str]:
     ld_tokens = [t for t in compat_env.get("LDFLAGS", "").split() if bad_prefix not in t]
     compat_env["CPPFLAGS"] = " ".join(cpp_tokens).strip()
     compat_env["LDFLAGS"] = " ".join(ld_tokens).strip()
+    header_flag = _existing_include_flag(
+        "pcap.h",
+        [
+            Path("/usr/include"),
+            Path("/usr/include/x86_64-linux-gnu"),
+            Path("/usr/local/include"),
+            Path("/opt/libpcap/include"),
+        ],
+    )
+    if not header_flag:
+        header_flag = _existing_include_flag(
+            "pcap/pcap.h",
+            [
+                Path("/usr/include"),
+                Path("/usr/include/x86_64-linux-gnu"),
+                Path("/usr/local/include"),
+                Path("/opt/libpcap/include"),
+            ],
+        )
+    lib_flag = _existing_library_dir_flag(
+        ["libpcap.so", "libpcap.a"],
+        [
+            Path("/usr/lib/x86_64-linux-gnu"),
+            Path("/lib/x86_64-linux-gnu"),
+            Path("/usr/lib64"),
+            Path("/lib64"),
+            Path("/usr/local/lib"),
+            Path("/opt/libpcap/lib"),
+        ],
+    )
+    if header_flag:
+        _prepend_env_tokens(compat_env, "CPPFLAGS", [header_flag])
+        _prepend_env_tokens(compat_env, "CFLAGS", [header_flag])
+        compat_env["LIBPCAP_CFLAGS"] = header_flag
+    if lib_flag:
+        _prepend_env_tokens(compat_env, "LDFLAGS", [lib_flag])
 
     for pkg in ["libpcap", "pcap"]:
         cflags = _pkg_config_output(pkg, "--cflags")
         libs = _pkg_config_output(pkg, "--libs")
         if cflags:
-            compat_env["CPPFLAGS"] = f"{cflags} {compat_env.get('CPPFLAGS', '')}".strip()
+            _prepend_env_tokens(compat_env, "CPPFLAGS", cflags.split())
+            _prepend_env_tokens(compat_env, "CFLAGS", cflags.split())
             compat_env["LIBPCAP_CFLAGS"] = cflags
         if libs:
             ld_flags = " ".join(tok for tok in libs.split() if tok.startswith("-L"))
             link_libs = " ".join(tok for tok in libs.split() if not tok.startswith("-L"))
             if ld_flags:
-                compat_env["LDFLAGS"] = f"{ld_flags} {compat_env.get('LDFLAGS', '')}".strip()
+                _prepend_env_tokens(compat_env, "LDFLAGS", ld_flags.split())
             if link_libs:
-                compat_env["LIBS"] = f"{link_libs} {compat_env.get('LIBS', '')}".strip()
+                _prepend_env_tokens(compat_env, "LIBS", link_libs.split())
                 compat_env["LIBPCAP_LIBS"] = link_libs
         if cflags or libs:
             break
@@ -349,18 +456,23 @@ def _tcpdump_compat_env(base_env: dict[str, str]) -> dict[str, str]:
             except OSError:
                 pc_libs = ""
         if pc_cflags:
-            compat_env["CPPFLAGS"] = f"{pc_cflags} {compat_env.get('CPPFLAGS', '')}".strip()
+            _prepend_env_tokens(compat_env, "CPPFLAGS", pc_cflags.split())
+            _prepend_env_tokens(compat_env, "CFLAGS", pc_cflags.split())
             compat_env["LIBPCAP_CFLAGS"] = pc_cflags
         if pc_libs:
             ld_flags = " ".join(tok for tok in pc_libs.split() if tok.startswith("-L"))
             link_libs = " ".join(tok for tok in pc_libs.split() if not tok.startswith("-L"))
             if ld_flags:
-                compat_env["LDFLAGS"] = f"{ld_flags} {compat_env.get('LDFLAGS', '')}".strip()
+                _prepend_env_tokens(compat_env, "LDFLAGS", ld_flags.split())
             if link_libs:
-                compat_env["LIBS"] = f"{link_libs} {compat_env.get('LIBS', '')}".strip()
+                _prepend_env_tokens(compat_env, "LIBS", link_libs.split())
                 compat_env["LIBPCAP_LIBS"] = link_libs
+    if "LIBPCAP_LIBS" not in compat_env:
+        _prepend_env_tokens(compat_env, "LIBS", ["-lpcap"])
+        compat_env["LIBPCAP_LIBS"] = "-lpcap"
     compat_env["ac_cv_header_pcap_h"] = "yes"
     compat_env["ac_cv_header_pcap_pcap_h"] = "yes"
+    compat_env["ac_cv_func_pcap_loop"] = "yes"
     compat_env["ac_cv_lib_pcap_pcap_loop"] = "yes"
     return compat_env
 
@@ -1387,6 +1499,10 @@ def _build_once(
     env.update(variant.env_overrides)
     if profile.name in {"tcpdump", "libxml2", "exiv2", "openvpn"}:
         env = _with_system_include_lib_paths(env)
+    if profile.name == "tcpdump":
+        env = _tcpdump_compat_env(env)
+    if profile.name == "openvpn":
+        env = _openvpn_compat_openssl_env(env)
     if ctx.enable_pie:
         if profile.name == "dwg2dxf":
             # Legacy dwg2dxf tags (e.g., 0.5) frequently fail PIE linking due to non-PIE objects.
@@ -2401,6 +2517,10 @@ def _build_once(
                 or "incomplete type 'EVP_PKEY'" in err_text
                 or "incomplete type 'X509'" in err_text
                 or "incomplete type 'EVP_MD'" in err_text
+                or "openssl/evp.h" in err_text
+                or "openssl/x509.h" in err_text
+                or "'openssl/evp.h' file not found" in err_text
+                or "'openssl/x509.h' file not found" in err_text
             ):
                 # First try mbedtls only when it's available.
                 has_mbedtls = Path("/usr/include/mbedtls").exists()

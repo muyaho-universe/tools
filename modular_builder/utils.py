@@ -41,20 +41,30 @@ def run_cmd(
     cmd_text = " ".join(cmd)
     print(f"[cmd] cwd={cwd} :: {cmd_text}")
     stderr_path = ""
+    stdout_path = ""
     try:
         with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", delete=False) as stderr_file:
             stderr_path = stderr_file.name
+            stdout_file = None
+            if quiet_stdout:
+                stdout_file = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", delete=False)
+                stdout_path = stdout_file.name
             try:
                 proc = subprocess.Popen(
                     cmd,  # noqa: S603
                     cwd=str(cwd),
                     env=env,
                     text=True,
-                    stdout=subprocess.DEVNULL if quiet_stdout else None,
+                    stdout=stdout_file if stdout_file is not None else None,
                     stderr=stderr_file,
                 )
             except OSError as exc:
+                if stdout_file is not None:
+                    stdout_file.close()
                 return False, str(exc)
+            finally:
+                if stdout_file is not None:
+                    stdout_file.close()
 
             start = time.time()
             last_log = -1
@@ -79,15 +89,30 @@ def run_cmd(
                     stderr_text = f.read() or ""
             except OSError:
                 stderr_text = ""
+        stdout_text = ""
+        if stdout_path and os.path.exists(stdout_path):
+            try:
+                with open(stdout_path, "r", encoding="utf-8", errors="ignore") as f:
+                    stdout_text = f.read() or ""
+            except OSError:
+                stdout_text = ""
     finally:
         if stderr_path and os.path.exists(stderr_path):
             try:
                 os.remove(stderr_path)
             except OSError:
                 pass
+        if stdout_path and os.path.exists(stdout_path):
+            try:
+                os.remove(stdout_path)
+            except OSError:
+                pass
 
     if result_code != 0:
         err = stderr_text.strip()
+        out_tail = stdout_text.strip()[-4000:]
+        if out_tail:
+            err = f"{err}\n[stdout-tail]\n{out_tail}".strip()
         if err:
             print("[stderr]")
             print(err)
