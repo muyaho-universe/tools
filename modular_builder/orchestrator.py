@@ -47,7 +47,17 @@ def _log_failure(ctx: BuildContext, row: BuildRow, ref_kind: str, step: str, err
     if err_text:
         lines = [ln for ln in err_text.splitlines() if ln.strip()]
         # Prefer compiler/configure error lines, otherwise keep the tail.
-        sig = [ln for ln in lines if ("error:" in ln.lower()) or ("undefined reference" in ln.lower()) or ("fatal:" in ln.lower())]
+        sig = [
+            ln
+            for ln in lines
+            if (
+                ("error:" in ln.lower())
+                or ("undefined reference" in ln.lower())
+                or ("fatal:" in ln.lower())
+                or ("cannot find" in ln.lower())
+                or ("ld:" in ln.lower())
+            )
+        ]
         if sig:
             picked = sig[-MAX_FAILURE_LOG_LINES:]
         else:
@@ -242,6 +252,11 @@ def _prepend_env_tokens(env: dict[str, str], key: str, tokens: list[str]) -> Non
     env[key] = " ".join(merged).strip()
 
 
+def _remove_env_tokens(env: dict[str, str], key: str, tokens: set[str]) -> None:
+    existing = env.get(key, "").split()
+    env[key] = " ".join(token for token in existing if token not in tokens).strip()
+
+
 def _filter_path_entries(value: str, blocked_parts: tuple[str, ...]) -> str:
     entries = []
     for entry in value.split(":"):
@@ -333,11 +348,10 @@ def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
         if ld_flags:
             _prepend_env_tokens(compat_env, "LDFLAGS", ld_flags.split())
         if link_libs:
-            _prepend_env_tokens(compat_env, "LIBS", link_libs.split())
             compat_env["OPENSSL_LIBS"] = link_libs
     else:
-        _prepend_env_tokens(compat_env, "LIBS", ["-lssl", "-lcrypto"])
         compat_env.setdefault("OPENSSL_LIBS", "-lssl -lcrypto")
+    _remove_env_tokens(compat_env, "LIBS", {"-lssl", "-lcrypto"})
     compat_env["ac_cv_header_openssl_ssl_h"] = "yes"
     compat_env["ac_cv_header_openssl_evp_h"] = "yes"
     compat_env["ac_cv_header_openssl_x509_h"] = "yes"
@@ -435,7 +449,6 @@ def _tcpdump_compat_env(base_env: dict[str, str]) -> dict[str, str]:
             if ld_flags:
                 _prepend_env_tokens(compat_env, "LDFLAGS", ld_flags.split())
             if link_libs:
-                _prepend_env_tokens(compat_env, "LIBS", link_libs.split())
                 compat_env["LIBPCAP_LIBS"] = link_libs
         if cflags or libs:
             break
@@ -466,11 +479,10 @@ def _tcpdump_compat_env(base_env: dict[str, str]) -> dict[str, str]:
             if ld_flags:
                 _prepend_env_tokens(compat_env, "LDFLAGS", ld_flags.split())
             if link_libs:
-                _prepend_env_tokens(compat_env, "LIBS", link_libs.split())
                 compat_env["LIBPCAP_LIBS"] = link_libs
     if "LIBPCAP_LIBS" not in compat_env:
-        _prepend_env_tokens(compat_env, "LIBS", ["-lpcap"])
         compat_env["LIBPCAP_LIBS"] = "-lpcap"
+    _remove_env_tokens(compat_env, "LIBS", {"-lpcap"})
     compat_env["ac_cv_header_pcap_h"] = "yes"
     compat_env["ac_cv_header_pcap_pcap_h"] = "yes"
     compat_env["ac_cv_func_pcap_loop"] = "yes"
@@ -1420,7 +1432,8 @@ def _compiler_can_link(cc: str, env: dict[str, str], cflags: str = "", ldflags: 
         src = tmp_dir / "probe.c"
         out = tmp_dir / "probe"
         src.write_text("int main(void){return 0;}\n", encoding="ascii")
-        cmd = [cc, *cflags.split(), str(src), "-o", str(out), *ldflags.split()]
+        libs = env.get("LIBS", "")
+        cmd = [cc, *cflags.split(), str(src), "-o", str(out), *ldflags.split(), *libs.split()]
         try:
             proc = subprocess.run(
                 cmd,
