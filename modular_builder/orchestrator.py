@@ -19,6 +19,7 @@ from .versioning import release_tags_in_range
 
 MAX_FAILURE_LOG_LINES = int(os.getenv("MAX_FAILURE_LOG_LINES", "40"))
 _TCPDUMP_LIBPCAP_LOCK = Lock()
+_OPENVPN_OPENSSL_LOCK = Lock()
 
 
 @dataclass
@@ -244,6 +245,94 @@ def _detect_openssl_legacy_prefix() -> Path | None:
     return None
 
 
+def _detect_openssl_prefix() -> Path | None:
+    candidates = [
+        os.getenv("OPENSSL_LEGACY_PREFIX", ""),
+        os.getenv("OPENSSL_PREFIX", ""),
+        "/home/user/openssl-1.1-install",
+        "/home/user/BinForge/local/openssl-1.1",
+        "/home/user/BinForge/local/openssl",
+        "/usr/local/openssl-1.1",
+        "/opt/openssl-1.1",
+        "/opt/openssl",
+        "/usr",
+    ]
+    for raw in candidates:
+        if not raw:
+            continue
+        prefix = Path(raw)
+        header = prefix / "include" / "openssl" / "evp.h"
+        x509 = prefix / "include" / "openssl" / "x509.h"
+        if header.exists() and x509.exists():
+            return prefix
+    return None
+
+
+def _has_openssl_prefix(prefix: Path) -> bool:
+    include_dir = prefix / "include" / "openssl"
+    lib_dirs = [prefix / "lib", prefix / "lib64", prefix / "lib" / "x86_64-linux-gnu"]
+    header_ok = (include_dir / "evp.h").exists() and (include_dir / "x509.h").exists()
+    lib_ok = any((lib_dir / name).exists() for lib_dir in lib_dirs for name in ["libssl.so", "libssl.a", "libcrypto.so", "libcrypto.a"])
+    return header_ok and lib_ok
+
+
+def _ensure_openvpn_openssl_dependency(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, dict[str, str], str]:
+    existing = _detect_openssl_prefix()
+    if existing and _has_openssl_prefix(existing):
+        return True, _apply_openssl_prefix(env, existing), ""
+
+    src_dir = Path(os.getenv("OPENSSL_SRC_DIR", str(profile.repo_dir.parent / "openssl-1.1-src")))
+    prefix = Path(os.getenv("OPENSSL_PREFIX", str(profile.repo_dir.parent / "openssl-1.1-install")))
+    with _OPENVPN_OPENSSL_LOCK:
+        if _has_openssl_prefix(prefix):
+            print(f"[openvpn-fix] using built OpenSSL prefix: {prefix}")
+            return True, _apply_openssl_prefix(env, prefix), ""
+
+        if not src_dir.exists():
+            ref = os.getenv("OPENSSL_REF", "OpenSSL_1_1_1w")
+            ok, err = run_cmd(
+                ["git", "clone", "--depth", "1", "--branch", ref, "https://github.com/openssl/openssl.git", str(src_dir)],
+                cwd=profile.repo_dir.parent,
+                quiet_stdout=False,
+            )
+            if not ok:
+                return False, env, err
+        elif (src_dir / ".git").exists() and os.getenv("OPENSSL_REF"):
+            ref = os.getenv("OPENSSL_REF", "")
+            ok, err = run_cmd(["git", "fetch", "--tags"], cwd=src_dir, env=env)
+            if not ok:
+                return False, env, err
+            ok, err = run_cmd(["git", "checkout", "-f", ref], cwd=src_dir, env=env)
+            if not ok:
+                return False, env, err
+
+        if not (src_dir / "Configure").exists():
+            return False, env, f"OpenSSL Configure not found: {src_dir / 'Configure'}"
+
+        prefix.mkdir(parents=True, exist_ok=True)
+        build_env = dict(env)
+        run_cmd(["make", "clean"], cwd=src_dir, env=build_env)
+        ok, err = run_cmd(
+            ["perl", "Configure", "linux-x86_64", "shared", "no-tests", f"--prefix={prefix}", f"--openssldir={prefix / 'ssl'}"],
+            cwd=src_dir,
+            env=build_env,
+            quiet_stdout=False,
+        )
+        if not ok:
+            return False, env, err
+        ok, err = run_cmd(["make", f"-j{max(1, os.cpu_count() or 1)}"], cwd=src_dir, env=build_env)
+        if not ok:
+            return False, env, err
+        ok, err = run_cmd(["make", "install_sw"], cwd=src_dir, env=build_env)
+        if not ok:
+            return False, env, err
+        if not _has_openssl_prefix(prefix):
+            return False, env, f"OpenSSL build completed but no usable headers/library found under {prefix}"
+
+    print(f"[openvpn-fix] built OpenSSL prefix: {prefix}")
+    return True, _apply_openssl_prefix(env, prefix), ""
+
+
 def _prepend_env_tokens(env: dict[str, str], key: str, tokens: list[str]) -> None:
     existing = env.get(key, "").split()
     merged: list[str] = []
@@ -283,6 +372,35 @@ def _existing_library_dir_flag(names: list[str], candidates: list[Path]) -> str:
     return ""
 
 
+def _apply_openssl_prefix(env: dict[str, str], prefix: Path) -> dict[str, str]:
+    compat_env = dict(env)
+    include_dir = prefix / "include"
+    lib_dirs = [prefix / "lib", prefix / "lib64", prefix / "lib" / "x86_64-linux-gnu"]
+    include_flag = f"-I{include_dir}"
+    lib_tokens = [f"-L{lib_dir}" for lib_dir in lib_dirs if lib_dir.exists()]
+
+    for key in ["CPPFLAGS", "CFLAGS", "CXXFLAGS", "AM_CPPFLAGS", "AM_CFLAGS"]:
+        _prepend_env_tokens(compat_env, key, [include_flag])
+    if lib_tokens:
+        _prepend_env_tokens(compat_env, "LDFLAGS", lib_tokens)
+    compat_env["OPENSSL_CFLAGS"] = include_flag
+    compat_env["OPENSSL_LIBS"] = " ".join([*lib_tokens, "-lssl", "-lcrypto"]).strip()
+    compat_env["CRYPTO_CFLAGS"] = include_flag
+    compat_env["CRYPTO_LIBS"] = compat_env["OPENSSL_LIBS"]
+
+    pkg_dirs = [lib_dir / "pkgconfig" for lib_dir in lib_dirs if (lib_dir / "pkgconfig").exists()]
+    pkg = ":".join(str(p) for p in pkg_dirs)
+    if pkg:
+        compat_env["PKG_CONFIG_PATH"] = f"{pkg}:{compat_env.get('PKG_CONFIG_PATH', '')}".strip(":")
+
+    ld_lib = compat_env.get("LD_LIBRARY_PATH", "").strip()
+    lib_path = ":".join(str(lib_dir) for lib_dir in lib_dirs if lib_dir.exists())
+    if lib_path:
+        compat_env["LD_LIBRARY_PATH"] = f"{lib_path}:{ld_lib}".strip(":")
+    _remove_env_tokens(compat_env, "LIBS", {"-lssl", "-lcrypto"})
+    return compat_env
+
+
 def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
     compat_env = dict(base_env)
     # Drop forced /usr/local OpenSSL include/lib paths; many environments keep OpenSSL 3.x there.
@@ -295,22 +413,12 @@ def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
         ("/usr/local/lib/pkgconfig", "/usr/local/lib64/pkgconfig", "/usr/local/share/pkgconfig"),
     )
 
-    legacy_prefix = _detect_openssl_legacy_prefix()
-    if legacy_prefix:
-        include_dir = legacy_prefix / "include"
-        lib_dir = legacy_prefix / "lib"
-        lib64_dir = legacy_prefix / "lib64"
-        cpp = compat_env.get("CPPFLAGS", "").strip()
-        ld = compat_env.get("LDFLAGS", "").strip()
-        pkg = compat_env.get("PKG_CONFIG_PATH", "").strip()
-        ld_lib = compat_env.get("LD_LIBRARY_PATH", "").strip()
-        compat_env["CPPFLAGS"] = f"-I{include_dir} {cpp}".strip()
-        compat_env["LDFLAGS"] = f"-L{lib_dir} -L{lib64_dir} {ld}".strip()
-        compat_env["PKG_CONFIG_PATH"] = f"{lib_dir}/pkgconfig:{lib64_dir}/pkgconfig:{pkg}".strip(":")
-        compat_env["LD_LIBRARY_PATH"] = f"{lib_dir}:{lib64_dir}:{ld_lib}".strip(":")
-        print(f"[openvpn-fix] using legacy OpenSSL prefix: {legacy_prefix}")
+    openssl_prefix = _detect_openssl_legacy_prefix() or _detect_openssl_prefix()
+    if openssl_prefix:
+        compat_env = _apply_openssl_prefix(compat_env, openssl_prefix)
+        print(f"[openvpn-fix] using OpenSSL prefix: {openssl_prefix}")
     else:
-        print("[openvpn-fix] legacy OpenSSL prefix not found; retrying without /usr/local OpenSSL paths")
+        print("[openvpn-fix] OpenSSL prefix not found; retrying without /usr/local OpenSSL paths")
     header_flag = _existing_include_flag(
         "openssl/evp.h",
         [
@@ -1788,6 +1896,11 @@ def _build_once(
             if not ok:
                 _log_failure(ctx, row, ref_kind, "configure", err)
                 return []
+        if profile.name == "openvpn":
+            ok, env, err = _ensure_openvpn_openssl_dependency(profile, env)
+            if not ok:
+                _log_failure(ctx, row, ref_kind, "configure", err)
+                return []
 
         if profile.configure_cmd:
             if openssl_safe_mode:
@@ -2672,6 +2785,33 @@ def _build_once(
                     retry_build = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
                     ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=lzo_env)
                     if ok:
+                        break
+        if (not ok) and profile.name == "openvpn":
+            err_text = err or ""
+            if (
+                "openssl/evp.h" in err_text
+                or "openssl/x509.h" in err_text
+                or "'openssl/evp.h' file not found" in err_text
+                or "'openssl/x509.h' file not found" in err_text
+            ):
+                compat_env = _openvpn_compat_openssl_env(env)
+                run_cmd(["make", "distclean"], cwd=profile.repo_dir, env=compat_env)
+                _patch_openvpn_disable_lzo(profile.repo_dir)
+                compat_cfgs = [
+                    ["./configure", "--disable-plugin-auth-pam", "--disable-comp-lzo", "--disable-lz4", "--with-crypto-library=openssl"],
+                    ["./configure", "--disable-plugin-auth-pam", "--disable-comp-lzo", "--with-crypto-library=openssl"],
+                    ["./configure", "--disable-plugin-auth-pam", "--with-crypto-library=openssl"],
+                ]
+                for compat_cfg in compat_cfgs:
+                    print(f"[retry] openvpn missing OpenSSL headers; trying: {' '.join(compat_cfg)}")
+                    ok, cfg_err = run_cmd(compat_cfg, cwd=profile.repo_dir, env=compat_env)
+                    if not ok:
+                        err = cfg_err or err
+                        continue
+                    retry_build = ["make", f"-j{max(1, os.cpu_count() or 1)}"]
+                    ok, err = run_cmd(retry_build, cwd=profile.repo_dir, env=compat_env)
+                    if ok:
+                        env.update(compat_env)
                         break
         if (not ok) and profile.name == "dwg2dxf":
             err_text = err or ""
