@@ -1452,7 +1452,9 @@ def _ensure_dwg2dxf_configure_script(repo_dir: Path, env: dict[str, str]) -> tup
 
 
 def _patch_liblouis_tool_dependency(repo_dir: Path) -> tuple[bool, str]:
-    targets = [repo_dir / "tools" / "Makefile", repo_dir / "tools" / "Makefile.in"]
+    targets: list[Path] = []
+    for name in ["Makefile", "Makefile.in", "Makefile.am"]:
+        targets.extend(repo_dir.rglob(name))
     changed_any = False
 
     for path in targets:
@@ -1468,6 +1470,8 @@ def _patch_liblouis_tool_dependency(repo_dir: Path) -> tuple[bool, str]:
         new_text = new_text.replace("\n../tools/libbrlcheck.la:\n    @true\n", "\n")
         new_text = new_text.replace("\n\\:\n\t@true\n", "\n")
         new_text = new_text.replace("\n\\:\n    @true\n", "\n")
+        new_text = re.sub(r"(?m)^\s*\.\./tools/libbrlcheck\.la\s*:\s*(?:\n[ \t].*)?", "", new_text)
+        new_text = re.sub(r"(?m)^\s*tools/libbrlcheck\.la\s*:\s*(?:\n[ \t].*)?", "", new_text)
         new_text = re.sub(
             r"(?m)^(\s*lou_checktable(?:\$\(EXEEXT\))?\s*:[^\n]*?)\s+\.\./tools/libbrlcheck\.la\b",
             r"\1",
@@ -1488,6 +1492,9 @@ def _patch_liblouis_tool_dependency(repo_dir: Path) -> tuple[bool, str]:
             r"\1",
             new_text,
         )
+        new_text = re.sub(r"(?m)([ \t])(?:\.\./)?tools/libbrlcheck\.la\b", "", new_text)
+        new_text = re.sub(r"(?m)([ \t])\$\(top_builddir\)/tools/libbrlcheck\.la\b", "", new_text)
+        new_text = re.sub(r"(?m)([ \t])\$\(top_srcdir\)/tools/libbrlcheck\.la\b", "", new_text)
         new_text = new_text.replace(" ../tools/libbrlcheck.la", "")
         new_text = new_text.replace("\t../tools/libbrlcheck.la", "")
         if new_text == text:
