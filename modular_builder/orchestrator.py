@@ -1468,6 +1468,28 @@ def _patch_liblouis_tool_dependency(repo_dir: Path) -> tuple[bool, str]:
         new_text = new_text.replace("\n../tools/libbrlcheck.la:\n    @true\n", "\n")
         new_text = new_text.replace("\n\\:\n\t@true\n", "\n")
         new_text = new_text.replace("\n\\:\n    @true\n", "\n")
+        new_text = re.sub(
+            r"(?m)^(\s*lou_checktable(?:\$\(EXEEXT\))?\s*:[^\n]*?)\s+\.\./tools/libbrlcheck\.la\b",
+            r"\1",
+            new_text,
+        )
+        new_text = re.sub(
+            r"(?m)^(\s*lou_checktable(?:\$\(EXEEXT\))?_DEPENDENCIES\s*=.*?)\s+\.\./tools/libbrlcheck\.la\b",
+            r"\1",
+            new_text,
+        )
+        new_text = re.sub(
+            r"(?m)^(\s*lou_checktable(?:\$\(EXEEXT\))?_LDADD\s*=.*?)\s+\.\./tools/libbrlcheck\.la\b",
+            r"\1",
+            new_text,
+        )
+        new_text = re.sub(
+            r"(?m)^(\s*am_lou_checktable_OBJECTS\s*=.*)$",
+            r"\1",
+            new_text,
+        )
+        new_text = new_text.replace(" ../tools/libbrlcheck.la", "")
+        new_text = new_text.replace("\t../tools/libbrlcheck.la", "")
         if new_text == text:
             continue
         try:
@@ -1477,7 +1499,7 @@ def _patch_liblouis_tool_dependency(repo_dir: Path) -> tuple[bool, str]:
             return False, str(exc)
 
     if changed_any:
-        print("[liblouis-fix] cleaned stale temporary makefile entries")
+        print("[liblouis-fix] removed stale libbrlcheck makefile dependency")
     return True, ""
 
 
@@ -2392,6 +2414,9 @@ def _build_once(
                 else:
                     err = cfg_err or err
         if (not ok) and profile.name in {"lou_trace", "lou_checktable", "lou_translate"}:
+            patch_ok, patch_err = _patch_liblouis_tool_dependency(profile.repo_dir)
+            if not patch_ok:
+                err = patch_err or err
             target_path = f"tools/{profile.name}"
             retry_plan = [
                 ["make", target_path],
