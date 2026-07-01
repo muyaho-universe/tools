@@ -162,9 +162,9 @@ export LIBPCAP_DIR=/home/user/libpcap
 export LIBPCAP_PREFIX=/home/user/libpcap-install
 export LIBPCAP_REF=libpcap-1.9.1
 
-export OPENSSL_SRC_DIR=/home/user/openssl-1.1-src
-export OPENSSL_PREFIX=/home/user/openssl-1.1-install
-export OPENSSL_REF=OpenSSL_1_1_1w
+export OPENSSL_SRC_DIR=/home/user/openssl-1.0-src
+export OPENSSL_PREFIX=/home/user/openssl-1.0-install
+export OPENSSL_REF=OpenSSL_1_0_2u
 export OPENSSL_LEGACY_PREFIX=/home/user/BinForge/local/openssl-1.1
 ```
 
@@ -186,14 +186,14 @@ ref:    libpcap-1.9.1
 
 ### openvpn
 
-OpenVPN 2.4.x 빌드에 필요한 OpenSSL 헤더와 라이브러리를 찾습니다. 없으면 OpenSSL 1.1.1w를 실제로 clone/build/install해서 사용합니다.
+OpenVPN 2.4.x 빌드에 필요한 OpenSSL 1.0/1.1 계열 헤더와 라이브러리를 찾습니다. 없으면 OpenSSL 1.0.2u를 실제로 clone/build/install해서 사용합니다. 시스템 OpenSSL 3.x는 2.4 계열에서 사라진 RSA/SSLEAY 심볼 때문에 자동 후보에서 제외합니다.
 
 기본값:
 
 ```text
-source: /home/user/openssl-1.1-src
-prefix: /home/user/openssl-1.1-install
-ref:    OpenSSL_1_1_1w
+source: /home/user/openssl-1.0-src
+prefix: /home/user/openssl-1.0-install
+ref:    OpenSSL_1_0_2u
 ```
 
 이 dependency 처리는 더미 파일을 만들지 않습니다. 실제 헤더와 실제 라이브러리를 빌드해서 사용합니다.
