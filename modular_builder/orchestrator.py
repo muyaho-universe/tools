@@ -220,10 +220,30 @@ def _prepare_build(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, st
     return True, ""
 
 
+def _openssl_version_text(prefix: Path) -> str:
+    header = prefix / "include" / "openssl" / "opensslv.h"
+    if not header.exists():
+        return ""
+    try:
+        return header.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _is_openvpn_compatible_openssl_prefix(prefix: Path) -> bool:
+    if not _has_openssl_prefix(prefix):
+        return False
+    txt = _openssl_version_text(prefix)
+    return "OpenSSL 1.0." in txt or "OpenSSL 1.1." in txt
+
+
 def _detect_openssl_legacy_prefix() -> Path | None:
     candidates = [
         os.getenv("OPENSSL_LEGACY_PREFIX", ""),
+        os.getenv("OPENSSL_PREFIX", ""),
+        "/home/user/openssl-1.0-install",
         "/home/user/BinForge/local/openssl-1.1",
+        "/home/user/openssl-1.1-install",
         "/usr/local/openssl-1.1",
         "/opt/openssl-1.1",
     ]
@@ -231,16 +251,7 @@ def _detect_openssl_legacy_prefix() -> Path | None:
         if not raw:
             continue
         prefix = Path(raw)
-        if not prefix.exists():
-            continue
-        header = prefix / "include" / "openssl" / "opensslv.h"
-        if not header.exists():
-            continue
-        try:
-            txt = header.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if "OpenSSL 1.1." in txt or "OpenSSL 1.0." in txt:
+        if _is_openvpn_compatible_openssl_prefix(prefix):
             return prefix
     return None
 
@@ -261,9 +272,7 @@ def _detect_openssl_prefix() -> Path | None:
         if not raw:
             continue
         prefix = Path(raw)
-        header = prefix / "include" / "openssl" / "evp.h"
-        x509 = prefix / "include" / "openssl" / "x509.h"
-        if header.exists() and x509.exists():
+        if _is_openvpn_compatible_openssl_prefix(prefix):
             return prefix
     return None
 
@@ -277,19 +286,19 @@ def _has_openssl_prefix(prefix: Path) -> bool:
 
 
 def _ensure_openvpn_openssl_dependency(profile: BuildProfile, env: dict[str, str]) -> tuple[bool, dict[str, str], str]:
-    existing = _detect_openssl_prefix()
-    if existing and _has_openssl_prefix(existing):
+    existing = _detect_openssl_legacy_prefix() or _detect_openssl_prefix()
+    if existing:
         return True, _apply_openssl_prefix(env, existing), ""
 
-    src_dir = Path(os.getenv("OPENSSL_SRC_DIR", str(profile.repo_dir.parent / "openssl-1.1-src")))
-    prefix = Path(os.getenv("OPENSSL_PREFIX", str(profile.repo_dir.parent / "openssl-1.1-install")))
+    src_dir = Path(os.getenv("OPENSSL_SRC_DIR", str(profile.repo_dir.parent / "openssl-1.0-src")))
+    prefix = Path(os.getenv("OPENSSL_PREFIX", str(profile.repo_dir.parent / "openssl-1.0-install")))
     with _OPENVPN_OPENSSL_LOCK:
-        if _has_openssl_prefix(prefix):
+        if _is_openvpn_compatible_openssl_prefix(prefix):
             print(f"[openvpn-fix] using built OpenSSL prefix: {prefix}")
             return True, _apply_openssl_prefix(env, prefix), ""
 
         if not src_dir.exists():
-            ref = os.getenv("OPENSSL_REF", "OpenSSL_1_1_1w")
+            ref = os.getenv("OPENSSL_REF", "OpenSSL_1_0_2u")
             ok, err = run_cmd(
                 ["git", "clone", "--depth", "1", "--branch", ref, "https://github.com/openssl/openssl.git", str(src_dir)],
                 cwd=profile.repo_dir.parent,
@@ -313,7 +322,7 @@ def _ensure_openvpn_openssl_dependency(profile: BuildProfile, env: dict[str, str
         build_env = dict(env)
         run_cmd(["make", "clean"], cwd=src_dir, env=build_env)
         ok, err = run_cmd(
-            ["perl", "Configure", "linux-x86_64", "shared", "no-tests", f"--prefix={prefix}", f"--openssldir={prefix / 'ssl'}"],
+            ["perl", "Configure", "linux-x86_64", "shared", "no-asm", f"--prefix={prefix}", f"--openssldir={prefix / 'ssl'}"],
             cwd=src_dir,
             env=build_env,
             quiet_stdout=False,
@@ -325,9 +334,13 @@ def _ensure_openvpn_openssl_dependency(profile: BuildProfile, env: dict[str, str
             return False, env, err
         ok, err = run_cmd(["make", "install_sw"], cwd=src_dir, env=build_env)
         if not ok:
+            ok, err = run_cmd(["make", "install"], cwd=src_dir, env=build_env)
+        if not ok:
             return False, env, err
-        if not _has_openssl_prefix(prefix):
-            return False, env, f"OpenSSL build completed but no usable headers/library found under {prefix}"
+        if not _is_openvpn_compatible_openssl_prefix(prefix):
+            version_text = _openssl_version_text(prefix).strip().splitlines()[:1]
+            version_hint = f" ({version_text[0]})" if version_text else ""
+            return False, env, f"OpenSSL build completed but no OpenVPN-compatible OpenSSL 1.0/1.1 prefix found under {prefix}{version_hint}"
 
     print(f"[openvpn-fix] built OpenSSL prefix: {prefix}")
     return True, _apply_openssl_prefix(env, prefix), ""
@@ -345,6 +358,11 @@ def _prepend_env_tokens(env: dict[str, str], key: str, tokens: list[str]) -> Non
 def _remove_env_tokens(env: dict[str, str], key: str, tokens: set[str]) -> None:
     existing = env.get(key, "").split()
     env[key] = " ".join(token for token in existing if token not in tokens).strip()
+
+
+def _remove_env_token_prefixes(env: dict[str, str], key: str, prefixes: tuple[str, ...]) -> None:
+    existing = env.get(key, "").split()
+    env[key] = " ".join(token for token in existing if not token.startswith(prefixes)).strip()
 
 
 def _filter_path_entries(value: str, blocked_parts: tuple[str, ...]) -> str:
@@ -380,6 +398,8 @@ def _apply_openssl_prefix(env: dict[str, str], prefix: Path) -> dict[str, str]:
     lib_tokens = [f"-L{lib_dir}" for lib_dir in lib_dirs if lib_dir.exists()]
 
     for key in ["CPPFLAGS", "CFLAGS", "CXXFLAGS", "AM_CPPFLAGS", "AM_CFLAGS"]:
+        _remove_env_tokens(compat_env, key, {"-DOPENSSL_NO_DEPRECATED", "-DOPENSSL_NO_DEPRECATED_3_0"})
+        _remove_env_token_prefixes(compat_env, key, ("-DOPENSSL_API_COMPAT=",))
         _prepend_env_tokens(compat_env, key, [include_flag])
     if lib_tokens:
         _prepend_env_tokens(compat_env, "LDFLAGS", lib_tokens)
@@ -419,34 +439,27 @@ def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
         print(f"[openvpn-fix] using OpenSSL prefix: {openssl_prefix}")
     else:
         print("[openvpn-fix] OpenSSL prefix not found; retrying without /usr/local OpenSSL paths")
-    header_flag = _existing_include_flag(
-        "openssl/evp.h",
-        [
-            Path("/usr/include"),
-            Path("/usr/include/x86_64-linux-gnu"),
-            Path("/opt/openssl/include"),
-            Path("/opt/openssl-1.1/include"),
-        ],
-    )
-    lib_flag = _existing_library_dir_flag(
-        ["libssl.so", "libssl.a", "libcrypto.so", "libcrypto.a"],
-        [
-            Path("/usr/lib/x86_64-linux-gnu"),
-            Path("/lib/x86_64-linux-gnu"),
-            Path("/usr/lib64"),
-            Path("/lib64"),
-            Path("/opt/openssl/lib"),
-            Path("/opt/openssl-1.1/lib"),
-        ],
-    )
+    header_flag = ""
+    lib_flag = ""
+    if openssl_prefix:
+        header_flag = _existing_include_flag("openssl/evp.h", [openssl_prefix / "include"])
+        lib_flag = _existing_library_dir_flag(
+            ["libssl.so", "libssl.a", "libcrypto.so", "libcrypto.a"],
+            [openssl_prefix / "lib", openssl_prefix / "lib64", openssl_prefix / "lib" / "x86_64-linux-gnu"],
+        )
     if header_flag:
         _prepend_env_tokens(compat_env, "CPPFLAGS", [header_flag])
         _prepend_env_tokens(compat_env, "CFLAGS", [header_flag])
         compat_env["OPENSSL_CFLAGS"] = header_flag
     if lib_flag:
         _prepend_env_tokens(compat_env, "LDFLAGS", [lib_flag])
-    openssl_cflags = _pkg_config_output("openssl", "--cflags")
-    openssl_libs = _pkg_config_output("openssl", "--libs")
+    prefix_pkg_config = bool(
+        openssl_prefix
+        and compat_env.get("PKG_CONFIG_PATH")
+        and any(str(openssl_prefix) in entry for entry in compat_env.get("PKG_CONFIG_PATH", "").split(":"))
+    )
+    openssl_cflags = _pkg_config_output("openssl", "--cflags") if prefix_pkg_config else ""
+    openssl_libs = _pkg_config_output("openssl", "--libs") if prefix_pkg_config else ""
     if openssl_cflags:
         _prepend_env_tokens(compat_env, "CPPFLAGS", openssl_cflags.split())
         _prepend_env_tokens(compat_env, "CFLAGS", openssl_cflags.split())
@@ -466,11 +479,14 @@ def _openvpn_compat_openssl_env(base_env: dict[str, str]) -> dict[str, str]:
     compat_env["ac_cv_header_openssl_x509_h"] = "yes"
     compat_env["ac_cv_lib_ssl_SSL_new"] = "yes"
     compat_env["ac_cv_lib_crypto_EVP_CIPHER_CTX_new"] = "yes"
+    for key in ["CPPFLAGS", "CFLAGS", "CXXFLAGS", "AM_CPPFLAGS", "AM_CFLAGS"]:
+        _remove_env_tokens(compat_env, key, {"-DOPENSSL_NO_DEPRECATED", "-DOPENSSL_NO_DEPRECATED_3_0"})
+        _remove_env_token_prefixes(compat_env, key, ("-DOPENSSL_API_COMPAT=",))
     compat_env["CFLAGS"] = (
-        compat_env.get("CFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10100000L"
+        compat_env.get("CFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10000000L"
     ).strip()
     compat_env["CXXFLAGS"] = (
-        compat_env.get("CXXFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10100000L"
+        compat_env.get("CXXFLAGS", "") + " -Wno-error=deprecated-declarations -Wno-error -DOPENSSL_API_COMPAT=0x10000000L"
     ).strip()
     return compat_env
 
